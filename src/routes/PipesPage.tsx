@@ -1,14 +1,42 @@
+import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { PipeCard } from "../components/PipeCard";
-import { mockPipes } from "../data/mockPipes";
+import { getPipes } from "../lib/pipes";
+import type { Pipe } from "../types/pipe";
 
 export function PipesPage() {
+  const [pipes, setPipes] = useState<Pipe[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
+
+  useEffect(() => {
+    let mounted = true;
+
+    getPipes()
+      .then((items) => {
+        if (!mounted) return;
+        setPipes(items);
+      })
+      .catch(() => {
+        if (!mounted) return;
+        setErrorMessage("Unable to load pipes.");
+      })
+      .finally(() => {
+        if (!mounted) return;
+        setLoading(false);
+      });
+
+    return () => {
+      mounted = false;
+    };
+  }, []);
+
   return (
     <div>
       <section className="flex flex-col justify-between gap-8 border-b border-black/10 pb-10 md:flex-row md:items-end">
         <div>
           <p className="text-sm font-medium uppercase tracking-[0.2em] text-black/40">
-            NLP dashboard
+            MLP dashboard
           </p>
 
           <h1 className="mt-4 max-w-3xl text-5xl font-semibold tracking-[-0.05em]">
@@ -32,14 +60,24 @@ export function PipesPage() {
       <section className="py-10">
         <div className="mb-5 flex items-center justify-between">
           <h2 className="text-lg font-semibold">Production</h2>
-          <span className="text-sm text-black/40">{mockPipes.length} pipe</span>
+          <span className="text-sm text-black/40">
+            {loading ? "Loading…" : `${pipes.length} pipe${pipes.length > 1 ? "s" : ""}`}
+          </span>
         </div>
 
-        <div className="grid gap-5 md:grid-cols-2">
-          {mockPipes.map((pipe) => (
-            <PipeCard key={pipe.id} pipe={pipe} />
-          ))}
-        </div>
+        {errorMessage ? (
+          <p className="rounded-2xl bg-red-500/10 px-4 py-3 text-sm text-red-700">
+            {errorMessage}
+          </p>
+        ) : null}
+
+        {!loading && !errorMessage ? (
+          <div className="grid gap-5 md:grid-cols-2">
+            {pipes.map((pipe) => (
+              <PipeCard key={pipe.id} pipe={pipe} />
+            ))}
+          </div>
+        ) : null}
       </section>
 
       <section className="rounded-3xl border border-dashed border-black/15 p-8">

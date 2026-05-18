@@ -1,5 +1,7 @@
+import { useEffect, useState } from "react";
 import { Link, useParams } from "react-router-dom";
-import { mockPipes } from "../data/mockPipes";
+import { getPipeById } from "../lib/pipes";
+import type { Pipe } from "../types/pipe";
 
 const mockPrediction = {
   predicted_category: "cardboard",
@@ -12,7 +14,35 @@ const mockPrediction = {
 
 export function PipeDetailPage() {
   const { pipeId } = useParams();
-  const pipe = mockPipes.find((item) => item.id === pipeId);
+  const [pipe, setPipe] = useState<Pipe | null>(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    let mounted = true;
+
+    if (!pipeId) {
+      setLoading(false);
+      return;
+    }
+
+    getPipeById(pipeId)
+      .then((item) => {
+        if (!mounted) return;
+        setPipe(item);
+      })
+      .finally(() => {
+        if (!mounted) return;
+        setLoading(false);
+      });
+
+    return () => {
+      mounted = false;
+    };
+  }, [pipeId]);
+
+  if (loading) {
+    return <p className="text-sm text-black/50">Loading pipe…</p>;
+  }
 
   if (!pipe) {
     return (

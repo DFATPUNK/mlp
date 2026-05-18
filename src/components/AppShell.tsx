@@ -1,7 +1,15 @@
-import { Link, Outlet, useLocation } from "react-router-dom";
+import { Link, Outlet, useLocation, useNavigate } from "react-router-dom";
+import { useAuth } from "../lib/auth";
 
 export function AppShell() {
   const location = useLocation();
+  const navigate = useNavigate();
+  const { signOut, user } = useAuth();
+
+  async function handleSignOut() {
+    await signOut();
+    navigate("/login");
+  }
 
   const navItems = [
     { label: "Pipes", href: "/app/pipes" },
@@ -33,12 +41,26 @@ export function AppShell() {
             })}
           </nav>
 
-          <Link
-            to="/app/pipes/new"
-            className="rounded-full bg-black px-4 py-2 text-sm font-medium text-white transition hover:bg-black/80"
-          >
-            Create a pipe
-          </Link>
+          <div className="flex items-center gap-3">
+            <span className="hidden text-sm text-black/40 lg:inline">
+              {user?.email}
+            </span>
+
+            <Link
+              to="/app/pipes/new"
+              className="rounded-full bg-black px-4 py-2 text-sm font-medium text-white transition hover:bg-black/80"
+            >
+              Create a pipe
+            </Link>
+
+            <button
+              type="button"
+              onClick={handleSignOut}
+              className="rounded-full border border-black/10 px-4 py-2 text-sm font-medium transition hover:border-black/30"
+            >
+              Log out
+            </button>
+          </div>
         </div>
       </header>
 

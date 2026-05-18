@@ -1,9 +1,18 @@
 import { Navigate, Outlet } from "react-router-dom";
+import { useAuth } from "../lib/auth";
 
 export function ProtectedRoute() {
-  const isAuthenticated = localStorage.getItem("nlp_demo_auth") === "true";
+  const { session, loading } = useAuth();
 
-  if (!isAuthenticated) {
+  if (loading) {
+    return (
+      <main className="flex min-h-screen items-center justify-center bg-[#f7f4ed] text-[#0b0b0b]">
+        <p className="text-sm text-black/50">Loading session…</p>
+      </main>
+    );
+  }
+
+  if (!session) {
     return <Navigate to="/login" replace />;
   }
 
