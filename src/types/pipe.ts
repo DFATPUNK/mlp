@@ -16,6 +16,13 @@ export type Pipe = {
   updatedAt: string;
 };
 
+export type SchemaField = {
+  name: string;
+  type: "string" | "number" | "boolean" | "array" | "object" | "file" | "url";
+  description: string;
+  required?: boolean;
+};
+
 export type WasteClassifierOutput = {
   predicted_category:
     | "aluminium"
@@ -29,3 +36,5 @@ export type WasteClassifierOutput = {
     confidence: number;
   }[];
 };
+
+export type BuilderPipeType = "tabular_classification" | "tabular_regression";

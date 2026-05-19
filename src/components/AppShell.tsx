@@ -22,7 +22,7 @@ export function AppShell() {
       <header className="border-b border-black/10">
         <div className="mx-auto flex max-w-7xl items-center justify-between px-6 py-5">
           <Link to="/app/pipes" className="text-lg font-semibold tracking-tight">
-            NLP
+            MLP
           </Link>
 
           <nav className="hidden items-center gap-8 text-sm text-black/60 md:flex">
