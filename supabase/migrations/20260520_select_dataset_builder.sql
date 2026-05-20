@@ -51,16 +51,20 @@ alter table dataset_sources enable row level security;
 alter table dataset_profiles enable row level security;
 alter table pipe_step_outputs enable row level security;
 
-create policy if not exists "provider_connections_owner_rw" on provider_connections
+drop policy if exists "provider_connections_owner_rw" on provider_connections;
+create policy "provider_connections_owner_rw" on provider_connections
 for all using (auth.uid() = user_id) with check (auth.uid() = user_id);
 
-create policy if not exists "dataset_sources_owner_rw" on dataset_sources
+drop policy if exists "dataset_sources_owner_rw" on dataset_sources;
+create policy "dataset_sources_owner_rw" on dataset_sources
 for all using (auth.uid() = user_id) with check (auth.uid() = user_id);
 
-create policy if not exists "dataset_profiles_owner_rw" on dataset_profiles
+drop policy if exists "dataset_profiles_owner_rw" on dataset_profiles;
+create policy "dataset_profiles_owner_rw" on dataset_profiles
 for all using (exists (select 1 from pipes p where p.id = dataset_profiles.pipe_id and p.owner_id = auth.uid()))
 with check (exists (select 1 from pipes p where p.id = dataset_profiles.pipe_id and p.owner_id = auth.uid()));
 
-create policy if not exists "pipe_step_outputs_owner_rw" on pipe_step_outputs
+drop policy if exists "pipe_step_outputs_owner_rw" on pipe_step_outputs;
+create policy "pipe_step_outputs_owner_rw" on pipe_step_outputs
 for all using (exists (select 1 from pipes p where p.id = pipe_step_outputs.pipe_id and p.owner_id = auth.uid()))
 with check (exists (select 1 from pipes p where p.id = pipe_step_outputs.pipe_id and p.owner_id = auth.uid()));

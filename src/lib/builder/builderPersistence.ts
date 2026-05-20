@@ -25,7 +25,23 @@ export async function persistSelectDatasetStep(input: {
   const snapshot = { rows: input.dataset.rows, profile: input.profile };
   const storageUri = `supabase://artifacts/dataset/${pipeId}/${source.id}`;
 
-  const { data: artifact, error: artifactError } = await supabase.from("artifacts").insert({ pipe_id: pipeId, kind: "dataset_snapshot", content: snapshot }).select("id").single();
+  const { data: artifact, error: artifactError } = await supabase
+    .from("artifacts")
+    .insert({
+      pipe_id: pipeId,
+      artifact_type: "dataset_snapshot",
+      kind: "dataset_snapshot",
+      name: `${input.dataset.sourceLabel} snapshot`,
+      content: snapshot,
+      metadata: {
+        provider: input.provider,
+        source_label: input.dataset.sourceLabel,
+        row_count: input.profile.rowCount,
+        column_count: input.profile.columnCount,
+      },
+    })
+    .select("id")
+    .single();
   if (artifactError) throw artifactError;
 
   const output = { step_key: "select_dataset", status: "completed", dataset_artifact_id: artifact.id, dataset_source_id: source.id, provider: input.provider, source_label: input.dataset.sourceLabel, row_count: input.profile.rowCount, column_count: input.profile.columnCount, columns: input.profile.columns, eligibility: input.profile.eligibility, storage: { format: "json", uri: storageUri } };
