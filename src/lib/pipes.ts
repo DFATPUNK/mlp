@@ -33,6 +33,28 @@ export type SelectDatasetStepOutput = {
   };
 };
 
+export type CleanDataStepOutput = {
+  step_key: "clean_data";
+  status: "completed";
+  cleaned_dataset_artifact_id: string;
+  previous_dataset_artifact_id: string;
+  rows_before: number;
+  rows_after: number;
+  columns_before: number;
+  columns_after: number;
+  missing_values_before: number;
+  missing_values_after: number;
+  duplicate_rows_removed: number;
+  excluded_feature_columns: string[];
+  storage: { format: "json"; uri: string };
+};
+
+export type ArtifactRecord = {
+  id: string;
+  content: unknown;
+  metadata: Record<string, unknown> | null;
+};
+
 function mapPipe(pipe: PipeRow): Pipe {
   return {
     id: pipe.id,
@@ -75,18 +97,37 @@ export async function deletePipe(pipeId: string): Promise<void> {
   if (error) throw error;
 }
 
-export async function getSelectDatasetStepOutput(
-  pipeId: string,
-): Promise<SelectDatasetStepOutput | null> {
+export async function getStepOutput<T>(pipeId: string, stepKey: string): Promise<T | null> {
   const { data, error } = await supabase
     .from("pipe_step_outputs")
     .select("output, status")
     .eq("pipe_id", pipeId)
-    .eq("step_key", "select_dataset")
+    .eq("step_key", stepKey)
     .maybeSingle();
 
   if (error) throw error;
   if (!data || data.status !== "completed") return null;
 
-  return data.output as SelectDatasetStepOutput;
+  return data.output as T;
+}
+
+export async function getSelectDatasetStepOutput(pipeId: string): Promise<SelectDatasetStepOutput | null> {
+  return getStepOutput<SelectDatasetStepOutput>(pipeId, "select_dataset");
+}
+
+export async function getCleanDataStepOutput(pipeId: string): Promise<CleanDataStepOutput | null> {
+  return getStepOutput<CleanDataStepOutput>(pipeId, "clean_data");
+}
+
+export async function getArtifactById(artifactId: string): Promise<ArtifactRecord | null> {
+  const { data, error } = await supabase
+    .from("artifacts")
+    .select("id, content, metadata")
+    .eq("id", artifactId)
+    .maybeSingle();
+
+  if (error) throw error;
+  if (!data) return null;
+
+  return data as ArtifactRecord;
 }
