@@ -21,6 +21,7 @@ export default function App() {
             path="pipes/new/:pipeType"
             element={<PipeBuilderPage />}
           />
+          <Route path="pipes/:pipeId/builder" element={<PipeBuilderPage />} />
           <Route path="pipes/:pipeId" element={<PipeDetailPage />} />
         </Route>
       </Route>
