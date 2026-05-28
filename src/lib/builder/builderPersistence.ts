@@ -54,3 +54,84 @@ export async function persistSelectDatasetStep(input: {
 
   return { pipeId, artifactId: artifact.id, output };
 }
+
+export async function persistCleanDataStep(input: {
+  pipeId: string;
+  provider: DatasetProvider;
+  sourceLabel: string;
+  previousDatasetArtifactId: string;
+  cleanedRows: Record<string, unknown>[];
+  cleaningPlan: unknown;
+  cleaningResult: {
+    rows_before: number;
+    rows_after: number;
+    columns_before: number;
+    columns_after: number;
+    missing_values_before: number;
+    missing_values_after: number;
+    duplicate_rows_removed: number;
+    excluded_feature_columns: string[];
+  };
+  profileBefore: unknown;
+  profileAfter: DatasetProfile;
+}) {
+  const storageUri = `supabase://artifacts/cleaned_dataset/${input.pipeId}/${input.previousDatasetArtifactId}`;
+  const content = {
+    rows: input.cleanedRows,
+    previous_dataset_artifact_id: input.previousDatasetArtifactId,
+    cleaning_plan: input.cleaningPlan,
+    cleaning_result: input.cleaningResult,
+    profile_before: input.profileBefore,
+    profile_after: input.profileAfter,
+  };
+
+  const { data: artifact, error: artifactError } = await supabase
+    .from("artifacts")
+    .insert({
+      pipe_id: input.pipeId,
+      artifact_type: "cleaned_dataset",
+      kind: "cleaned_dataset",
+      name: `${input.sourceLabel} cleaned dataset`,
+      content,
+      metadata: {
+        source_label: input.sourceLabel,
+        provider: input.provider,
+        row_count: input.cleaningResult.rows_after,
+        column_count: input.cleaningResult.columns_after,
+        previous_dataset_artifact_id: input.previousDatasetArtifactId,
+      },
+    })
+    .select("id")
+    .single();
+
+  if (artifactError) throw artifactError;
+
+  const output = {
+    step_key: "clean_data",
+    status: "completed",
+    cleaned_dataset_artifact_id: artifact.id,
+    previous_dataset_artifact_id: input.previousDatasetArtifactId,
+    rows_before: input.cleaningResult.rows_before,
+    rows_after: input.cleaningResult.rows_after,
+    columns_before: input.cleaningResult.columns_before,
+    columns_after: input.cleaningResult.columns_after,
+    missing_values_before: input.cleaningResult.missing_values_before,
+    missing_values_after: input.cleaningResult.missing_values_after,
+    duplicate_rows_removed: input.cleaningResult.duplicate_rows_removed,
+    excluded_feature_columns: input.cleaningResult.excluded_feature_columns,
+    storage: { format: "json", uri: storageUri },
+  };
+
+  const stepOutput = await supabase
+    .from("pipe_step_outputs")
+    .upsert(
+      { pipe_id: input.pipeId, step_key: "clean_data", artifact_id: artifact.id, output, status: "completed" },
+      { onConflict: "pipe_id,step_key" },
+    )
+    .select("id")
+    .single();
+
+  if (stepOutput.error) throw stepOutput.error;
+
+  return { artifactId: artifact.id, output };
+}

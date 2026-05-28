@@ -62,3 +62,41 @@ export type ProviderDataset = {
   sourceConfig: Record<string, unknown>;
   rows: Record<string, unknown>[];
 };
+
+export type CleaningStrategy =
+  | "median"
+  | "mean"
+  | "most_frequent"
+  | "unknown"
+  | "remove_rows"
+  | "leave_as_is";
+
+export type ColumnCleaningPlan = {
+  name: string;
+  detected_type: ColumnProfile["type"];
+  issues: string[];
+  missing_count: number;
+  special_missing_token_count?: number;
+  selected_strategy?: CleaningStrategy;
+  recommended_strategy?: CleaningStrategy;
+  recommended_role?: "feature" | "exclude_from_features" | "target_candidate";
+};
+
+export type CleaningPlan = {
+  duplicateRows: {
+    action: "remove" | "keep";
+  };
+  columns: ColumnCleaningPlan[];
+};
+
+export type CleaningResult = {
+  rows_before: number;
+  rows_after: number;
+  columns_before: number;
+  columns_after: number;
+  missing_values_before: number;
+  missing_values_after: number;
+  duplicate_rows_before: number;
+  duplicate_rows_removed: number;
+  excluded_feature_columns: string[];
+};
