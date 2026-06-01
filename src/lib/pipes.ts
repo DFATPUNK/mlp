@@ -12,47 +12,50 @@ type PipeRow = {
   updated_at: string;
 };
 
-export async function getPipes(): Promise<Pipe[]> {
-  const { data, error } = await supabase
-    .from("pipes")
-    .select(
-      "id, name, description, type, status, is_template, created_at, updated_at",
-    )
-    .order("created_at", { ascending: true });
+export type SelectDatasetStepOutput = {
+  step_key: "select_dataset";
+  status: "completed";
+  dataset_artifact_id: string;
+  dataset_source_id: string;
+  provider: "huggingface" | "airtable" | "google_sheets";
+  source_label: string;
+  row_count: number;
+  column_count: number;
+  columns: unknown[];
+  eligibility: {
+    eligible: boolean;
+    blocking_issues: unknown[];
+    warnings: unknown[];
+  };
+  storage: {
+    format: "json";
+    uri: string;
+  };
+};
 
-  if (error) {
-    throw error;
-  }
+export type CleanDataStepOutput = {
+  step_key: "clean_data";
+  status: "completed";
+  cleaned_dataset_artifact_id: string;
+  previous_dataset_artifact_id: string;
+  rows_before: number;
+  rows_after: number;
+  columns_before: number;
+  columns_after: number;
+  missing_values_before: number;
+  missing_values_after: number;
+  duplicate_rows_removed: number;
+  excluded_feature_columns: string[];
+  storage: { format: "json"; uri: string };
+};
 
-  return ((data ?? []) as PipeRow[]).map((pipe) => ({
-    id: pipe.id,
-    name: pipe.name,
-    description: pipe.description ?? "",
-    type: pipe.type,
-    status: pipe.status,
-    isTemplate: pipe.is_template,
-    createdAt: pipe.created_at,
-    updatedAt: pipe.updated_at,
-  }));
-}
+export type ArtifactRecord = {
+  id: string;
+  content: unknown;
+  metadata: Record<string, unknown> | null;
+};
 
-export async function getPipeById(pipeId: string): Promise<Pipe | null> {
-  const { data, error } = await supabase
-    .from("pipes")
-    .select(
-      "id, name, description, type, status, is_template, created_at, updated_at",
-    )
-    .eq("id", pipeId)
-    .maybeSingle();
-
-  if (error) {
-    throw error;
-  }
-
-  if (!data) return null;
-
-  const pipe = data as PipeRow;
-
+function mapPipe(pipe: PipeRow): Pipe {
   return {
     id: pipe.id,
     name: pipe.name,
@@ -63,4 +66,68 @@ export async function getPipeById(pipeId: string): Promise<Pipe | null> {
     createdAt: pipe.created_at,
     updatedAt: pipe.updated_at,
   };
+}
+
+export async function getPipes(): Promise<Pipe[]> {
+  const { data, error } = await supabase
+    .from("pipes")
+    .select("id, name, description, type, status, is_template, created_at, updated_at")
+    .order("created_at", { ascending: true });
+
+  if (error) throw error;
+
+  return ((data ?? []) as PipeRow[]).map(mapPipe);
+}
+
+export async function getPipeById(pipeId: string): Promise<Pipe | null> {
+  const { data, error } = await supabase
+    .from("pipes")
+    .select("id, name, description, type, status, is_template, created_at, updated_at")
+    .eq("id", pipeId)
+    .maybeSingle();
+
+  if (error) throw error;
+  if (!data) return null;
+
+  return mapPipe(data as PipeRow);
+}
+
+export async function deletePipe(pipeId: string): Promise<void> {
+  const { error } = await supabase.from("pipes").delete().eq("id", pipeId);
+  if (error) throw error;
+}
+
+export async function getStepOutput<T>(pipeId: string, stepKey: string): Promise<T | null> {
+  const { data, error } = await supabase
+    .from("pipe_step_outputs")
+    .select("output, status")
+    .eq("pipe_id", pipeId)
+    .eq("step_key", stepKey)
+    .maybeSingle();
+
+  if (error) throw error;
+  if (!data || data.status !== "completed") return null;
+
+  return data.output as T;
+}
+
+export async function getSelectDatasetStepOutput(pipeId: string): Promise<SelectDatasetStepOutput | null> {
+  return getStepOutput<SelectDatasetStepOutput>(pipeId, "select_dataset");
+}
+
+export async function getCleanDataStepOutput(pipeId: string): Promise<CleanDataStepOutput | null> {
+  return getStepOutput<CleanDataStepOutput>(pipeId, "clean_data");
+}
+
+export async function getArtifactById(artifactId: string): Promise<ArtifactRecord | null> {
+  const { data, error } = await supabase
+    .from("artifacts")
+    .select("id, content, metadata")
+    .eq("id", artifactId)
+    .maybeSingle();
+
+  if (error) throw error;
+  if (!data) return null;
+
+  return data as ArtifactRecord;
 }
