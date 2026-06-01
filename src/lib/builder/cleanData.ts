@@ -22,10 +22,18 @@ export type AppliedCleaning = {
   profileAfter: ReturnType<typeof profileDataset>;
 };
 
-function isMissingValue(value: unknown, treatSpecialTokens: boolean) {
+export function isSpecialMissingToken(value: unknown) {
+  return typeof value === "string" && SPECIAL_MISSING_TOKENS.has(value.trim().toLowerCase());
+}
+
+export function isMissingValue(value: unknown, treatSpecialTokens = true) {
   if (value === null || value === undefined) return true;
-  if (!treatSpecialTokens || typeof value !== "string") return false;
-  return SPECIAL_MISSING_TOKENS.has(value.trim().toLowerCase());
+  if (!treatSpecialTokens) return false;
+  return isSpecialMissingToken(value);
+}
+
+export function getAffectedRowsForColumn(rows: Record<string, unknown>[], columnName: string) {
+  return rows.flatMap((row, rowIndex) => isMissingValue(row[columnName]) ? [{ rowIndex, row }] : []);
 }
 
 function rowKey(row: Record<string, unknown>) {
@@ -58,7 +66,7 @@ function countMissingValues(rows: Record<string, unknown>[], treatSpecialTokens:
 }
 
 function specialMissingTokenCount(rows: Record<string, unknown>[], column: string) {
-  return rows.filter((row) => typeof row[column] === "string" && SPECIAL_MISSING_TOKENS.has((row[column] as string).trim().toLowerCase())).length;
+  return rows.filter((row) => isSpecialMissingToken(row[column])).length;
 }
 
 function median(values: number[]) {
