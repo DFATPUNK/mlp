@@ -70,6 +70,21 @@ export type SplitDataStepOutput = {
   storage: { format: "json"; uri: string };
 };
 
+
+export type ChooseTargetStepOutput = {
+  step_key: "choose_target";
+  status: "completed";
+  target_config_artifact_id: string;
+  previous_split_dataset_artifact_id: string;
+  target_column: string;
+  detected_task_type: "tabular_classification" | "tabular_regression";
+  pipe_type: "tabular_classification" | "tabular_regression";
+  task_type_mismatch: boolean;
+  feature_columns: string[];
+  excluded_feature_columns: string[];
+  storage: { format: "json"; uri: string };
+};
+
 export type ArtifactRecord = {
   id: string;
   content: unknown;
@@ -142,6 +157,11 @@ export async function getCleanDataStepOutput(pipeId: string): Promise<CleanDataS
 
 export async function getSplitDataStepOutput(pipeId: string): Promise<SplitDataStepOutput | null> {
   return getStepOutput<SplitDataStepOutput>(pipeId, "split_data");
+}
+
+
+export async function getChooseTargetStepOutput(pipeId: string): Promise<ChooseTargetStepOutput | null> {
+  return getStepOutput<ChooseTargetStepOutput>(pipeId, "choose_target");
 }
 
 export async function getArtifactById(artifactId: string): Promise<ArtifactRecord | null> {

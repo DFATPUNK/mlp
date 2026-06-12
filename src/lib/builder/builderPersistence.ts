@@ -1,5 +1,5 @@
 import { supabase } from "../supabaseClient";
-import type { DatasetProfile, DatasetProvider, ProviderConnection, ProviderDataset } from "../../types/builder";
+import type { DatasetProfile, DatasetProvider, ProviderConnection, ProviderDataset, TargetConfig } from "../../types/builder";
 
 export async function persistSelectDatasetStep(input: {
   userId: string;
@@ -228,6 +228,64 @@ export async function persistSplitDataStep(input: {
     .from("pipe_step_outputs")
     .upsert(
       { pipe_id: input.pipeId, step_key: "split_data", artifact_id: artifact.id, output, status: "completed" },
+      { onConflict: "pipe_id,step_key" },
+    )
+    .select("id")
+    .single();
+
+  if (stepOutput.error) {
+    await supabase.from("artifacts").delete().eq("id", artifact.id);
+    throw stepOutput.error;
+  }
+
+  return { artifactId: artifact.id, output };
+}
+
+
+export async function persistChooseTargetStep(input: {
+  pipeId: string;
+  targetConfig: TargetConfig;
+}) {
+  const { data: artifact, error: artifactError } = await supabase
+    .from("artifacts")
+    .insert({
+      pipe_id: input.pipeId,
+      artifact_type: "target_config",
+      kind: "target_config",
+      name: "Target configuration",
+      content: input.targetConfig,
+      metadata: {
+        previous_split_dataset_artifact_id: input.targetConfig.previous_split_dataset_artifact_id,
+        target_column: input.targetConfig.target_column,
+        detected_task_type: input.targetConfig.detected_task_type,
+        pipe_type: input.targetConfig.pipe_type,
+        task_type_mismatch: input.targetConfig.task_type_mismatch,
+        feature_column_count: input.targetConfig.feature_columns.length,
+      },
+    })
+    .select("id")
+    .single();
+
+  if (artifactError) throw artifactError;
+
+  const output = {
+    step_key: "choose_target",
+    status: "completed",
+    target_config_artifact_id: artifact.id,
+    previous_split_dataset_artifact_id: input.targetConfig.previous_split_dataset_artifact_id,
+    target_column: input.targetConfig.target_column,
+    detected_task_type: input.targetConfig.detected_task_type,
+    pipe_type: input.targetConfig.pipe_type,
+    task_type_mismatch: input.targetConfig.task_type_mismatch,
+    feature_columns: input.targetConfig.feature_columns,
+    excluded_feature_columns: input.targetConfig.excluded_feature_columns,
+    storage: { format: "json", uri: `artifact:${artifact.id}` },
+  };
+
+  const stepOutput = await supabase
+    .from("pipe_step_outputs")
+    .upsert(
+      { pipe_id: input.pipeId, step_key: "choose_target", artifact_id: artifact.id, output, status: "completed" },
       { onConflict: "pipe_id,step_key" },
     )
     .select("id")
