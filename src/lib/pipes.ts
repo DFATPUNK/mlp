@@ -131,3 +131,29 @@ export async function getArtifactById(artifactId: string): Promise<ArtifactRecor
 
   return data as ArtifactRecord;
 }
+
+export async function createDraftPipe(
+  ownerId: string,
+  pipeType: "tabular_classification" | "tabular_regression",
+): Promise<Pipe> {
+  const name = pipeType === "tabular_regression"
+    ? "Untitled regression pipe"
+    : "Untitled classification pipe";
+
+  const { data, error } = await supabase
+    .from("pipes")
+    .insert({
+      owner_id: ownerId,
+      name,
+      description: "Draft pipe created by builder",
+      type: pipeType,
+      status: "draft",
+      is_template: false,
+    })
+    .select("id, name, description, type, status, is_template, created_at, updated_at")
+    .single();
+
+  if (error) throw error;
+
+  return mapPipe(data as PipeRow);
+}
