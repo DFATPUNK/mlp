@@ -100,3 +100,60 @@ export type CleaningResult = {
   duplicate_rows_removed: number;
   excluded_feature_columns: string[];
 };
+
+export type SplitConfig = {
+  train_pct: number;
+  validation_pct: number;
+  test_pct: number;
+  shuffle: boolean;
+  random_seed: number;
+  stratify: "auto_pending_target" | false;
+};
+
+export type SplitResult = {
+  rows_total: number;
+  train_rows: number;
+  validation_rows: number;
+  test_rows: number;
+};
+
+export type ColumnSummary = {
+  name: string;
+  detected_type: "numeric" | "boolean" | "categorical" | "datetime" | "text" | "unknown";
+  row_count: number;
+  missing_count: number;
+  unique_count: number;
+  unique_ratio: number;
+  sample_values: unknown[];
+  is_id_like: boolean;
+  is_constant: boolean;
+  has_many_missing_values: boolean;
+  is_long_text: boolean;
+};
+
+export type TargetAnalysis = {
+  detected_type: ColumnSummary["detected_type"];
+  unique_count: number;
+  unique_ratio: number;
+  missing_count: number;
+  sample_values: unknown[];
+  is_constant: boolean;
+  is_id_like: boolean;
+  is_long_text: boolean;
+  warnings: string[];
+  blocking_reasons: string[];
+  reason: string;
+  detected_task_type: "tabular_classification" | "tabular_regression";
+};
+
+export type TargetConfig = {
+  previous_split_dataset_artifact_id: string;
+  target_column: string;
+  detected_task_type: "tabular_classification" | "tabular_regression";
+  pipe_type: "tabular_classification" | "tabular_regression";
+  task_type_mismatch: boolean;
+  feature_columns: string[];
+  excluded_feature_columns: string[];
+  target_analysis: TargetAnalysis;
+  column_summaries: ColumnSummary[];
+};
