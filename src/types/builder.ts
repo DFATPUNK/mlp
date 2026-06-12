@@ -100,3 +100,19 @@ export type CleaningResult = {
   duplicate_rows_removed: number;
   excluded_feature_columns: string[];
 };
+
+export type SplitConfig = {
+  train_pct: number;
+  validation_pct: number;
+  test_pct: number;
+  shuffle: boolean;
+  random_seed: number;
+  stratify: "auto_pending_target" | false;
+};
+
+export type SplitResult = {
+  rows_total: number;
+  train_rows: number;
+  validation_rows: number;
+  test_rows: number;
+};

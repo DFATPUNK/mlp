@@ -49,6 +49,27 @@ export type CleanDataStepOutput = {
   storage: { format: "json"; uri: string };
 };
 
+
+export type SplitDataStepOutput = {
+  step_key: "split_data";
+  status: "completed";
+  split_dataset_artifact_id: string;
+  previous_cleaned_dataset_artifact_id: string;
+  rows_total: number;
+  train_rows: number;
+  validation_rows: number;
+  test_rows: number;
+  split_config: {
+    train_pct: number;
+    validation_pct: number;
+    test_pct: number;
+    shuffle: boolean;
+    random_seed: number;
+    stratify: "auto_pending_target" | false;
+  };
+  storage: { format: "json"; uri: string };
+};
+
 export type ArtifactRecord = {
   id: string;
   content: unknown;
@@ -117,6 +138,10 @@ export async function getSelectDatasetStepOutput(pipeId: string): Promise<Select
 
 export async function getCleanDataStepOutput(pipeId: string): Promise<CleanDataStepOutput | null> {
   return getStepOutput<CleanDataStepOutput>(pipeId, "clean_data");
+}
+
+export async function getSplitDataStepOutput(pipeId: string): Promise<SplitDataStepOutput | null> {
+  return getStepOutput<SplitDataStepOutput>(pipeId, "split_data");
 }
 
 export async function getArtifactById(artifactId: string): Promise<ArtifactRecord | null> {

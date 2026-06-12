@@ -163,3 +163,80 @@ export async function persistCleanDataStep(input: {
 
   return { artifactId: artifact.id, output };
 }
+
+export async function persistSplitDataStep(input: {
+  pipeId: string;
+  previousCleanedDatasetArtifactId: string;
+  splitConfig: unknown;
+  trainRows: Record<string, unknown>[];
+  validationRows: Record<string, unknown>[];
+  testRows: Record<string, unknown>[];
+  splitResult: {
+    rows_total: number;
+    train_rows: number;
+    validation_rows: number;
+    test_rows: number;
+  };
+}) {
+  const content = {
+    previous_cleaned_dataset_artifact_id: input.previousCleanedDatasetArtifactId,
+    split_config: input.splitConfig,
+    splits: {
+      train: input.trainRows,
+      validation: input.validationRows,
+      test: input.testRows,
+    },
+    split_result: input.splitResult,
+  };
+
+  const { data: artifact, error: artifactError } = await supabase
+    .from("artifacts")
+    .insert({
+      pipe_id: input.pipeId,
+      artifact_type: "split_dataset",
+      kind: "split_dataset",
+      name: "Split dataset",
+      content,
+      metadata: {
+        previous_cleaned_dataset_artifact_id: input.previousCleanedDatasetArtifactId,
+        row_count: input.splitResult.rows_total,
+        train_rows: input.splitResult.train_rows,
+        validation_rows: input.splitResult.validation_rows,
+        test_rows: input.splitResult.test_rows,
+        split_config: input.splitConfig,
+      },
+    })
+    .select("id")
+    .single();
+
+  if (artifactError) throw artifactError;
+
+  const output = {
+    step_key: "split_data",
+    status: "completed",
+    split_dataset_artifact_id: artifact.id,
+    previous_cleaned_dataset_artifact_id: input.previousCleanedDatasetArtifactId,
+    rows_total: input.splitResult.rows_total,
+    train_rows: input.splitResult.train_rows,
+    validation_rows: input.splitResult.validation_rows,
+    test_rows: input.splitResult.test_rows,
+    split_config: input.splitConfig,
+    storage: { format: "json", uri: `artifact:${artifact.id}` },
+  };
+
+  const stepOutput = await supabase
+    .from("pipe_step_outputs")
+    .upsert(
+      { pipe_id: input.pipeId, step_key: "split_data", artifact_id: artifact.id, output, status: "completed" },
+      { onConflict: "pipe_id,step_key" },
+    )
+    .select("id")
+    .single();
+
+  if (stepOutput.error) {
+    await supabase.from("artifacts").delete().eq("id", artifact.id);
+    throw stepOutput.error;
+  }
+
+  return { artifactId: artifact.id, output };
+}
