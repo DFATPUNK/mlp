@@ -3,6 +3,7 @@ import { AppShell } from "./components/AppShell";
 import { ProtectedRoute } from "./components/ProtectedRoute";
 import { CreatePipePage } from "./routes/CreatePipePage";
 import { LoginPage } from "./routes/LoginPage";
+import { NewPipeRedirectPage } from "./routes/NewPipeRedirectPage";
 import { PipeBuilderPage } from "./routes/PipeBuilderPage";
 import { PipeDetailPage } from "./routes/PipeDetailPage";
 import { PipesPage } from "./routes/PipesPage";
@@ -19,7 +20,7 @@ export default function App() {
           <Route path="pipes/new" element={<CreatePipePage />} />
           <Route
             path="pipes/new/:pipeType"
-            element={<PipeBuilderPage />}
+            element={<NewPipeRedirectPage />}
           />
           <Route path="pipes/:pipeId/builder" element={<PipeBuilderPage />} />
           <Route path="pipes/:pipeId" element={<PipeDetailPage />} />
