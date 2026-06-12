@@ -160,6 +160,14 @@ export function PipeDetailPage() {
           </p>
 
           <div className="mt-8 flex flex-wrap gap-3">
+            {pipe.status === "draft" && !pipe.isTemplate ? (
+              <Link
+                to={`/app/pipes/${pipe.id}/builder`}
+                className="rounded-full bg-black px-5 py-3 text-sm font-medium text-white transition hover:bg-black/80"
+              >
+                Resume editing
+              </Link>
+            ) : (
             <button
               type="button"
               onClick={handleTestPipe}
@@ -168,6 +176,7 @@ export function PipeDetailPage() {
             >
               {testStatus === "running" ? "Testing…" : "Test pipe"}
             </button>
+            )}
 
             <button
               type="button"
