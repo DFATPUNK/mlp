@@ -3,6 +3,7 @@ import { Link, useParams } from "react-router-dom";
 import { CleanDataStep } from "../components/builder/CleanDataStep";
 import { ChooseTargetStep } from "../components/builder/ChooseTargetStep";
 import { SplitDatasetStep } from "../components/builder/SplitDatasetStep";
+import { TrainModelsStep } from "../components/builder/TrainModelsStep";
 import { useAuth } from "../lib/auth";
 import { persistSelectDatasetStep } from "../lib/builder/builderPersistence";
 import { profileDataset } from "../lib/builder/datasetProfiling";
@@ -11,7 +12,7 @@ import {
   getDatasetKey
 } from "../lib/builder/huggingFaceDatasets";
 import { getMockConnections, getProviderDatasets } from "../lib/builder/mockDatasetProviders";
-import { getChooseTargetStepOutput, getCleanDataStepOutput, getPipeById, getSelectDatasetStepOutput, getSplitDataStepOutput, type ChooseTargetStepOutput, type CleanDataStepOutput, type SelectDatasetStepOutput, type SplitDataStepOutput } from "../lib/pipes";
+import { getChooseTargetStepOutput, getCleanDataStepOutput, getPipeById, getSelectDatasetStepOutput, getSplitDataStepOutput, getTrainModelsStepOutput, type ChooseTargetStepOutput, type CleanDataStepOutput, type SelectDatasetStepOutput, type SplitDataStepOutput, type TrainModelsStepOutput } from "../lib/pipes";
 import type { DatasetProvider } from "../types/builder";
 import type { BuilderPipeType } from "../types/pipe";
 
@@ -26,7 +27,8 @@ export function PipeBuilderPage() {
   const [cleanDataOutput, setCleanDataOutput] = useState<CleanDataStepOutput | null>(null);
   const [splitDataOutput, setSplitDataOutput] = useState<SplitDataStepOutput | null>(null);
   const [chooseTargetOutput, setChooseTargetOutput] = useState<ChooseTargetStepOutput | null>(null);
-  const [activeStep, setActiveStep] = useState<"select_dataset" | "clean_data" | "split_data" | "choose_target">("select_dataset");
+  const [trainModelsOutput, setTrainModelsOutput] = useState<TrainModelsStepOutput | null>(null);
+  const [activeStep, setActiveStep] = useState<"select_dataset" | "clean_data" | "split_data" | "choose_target" | "train_models">("select_dataset");
 
 
   const [provider, setProvider] = useState<DatasetProvider>("huggingface");
@@ -50,14 +52,16 @@ export function PipeBuilderPage() {
     if (!pipeId) return;
     let mounted = true;
 
-    void Promise.all([getPipeById(pipeId), getSelectDatasetStepOutput(pipeId), getCleanDataStepOutput(pipeId), getSplitDataStepOutput(pipeId), getChooseTargetStepOutput(pipeId)]).then(([pipe, stepOutput, cleanOutput, splitOutput, targetOutput]) => {
+    void Promise.all([getPipeById(pipeId), getSelectDatasetStepOutput(pipeId), getCleanDataStepOutput(pipeId), getSplitDataStepOutput(pipeId), getChooseTargetStepOutput(pipeId), getTrainModelsStepOutput(pipeId)]).then(([pipe, stepOutput, cleanOutput, splitOutput, targetOutput, trainOutput]) => {
       if (!mounted) return;
       if (pipe?.type === "tabular_classification" || pipe?.type === "tabular_regression") setLoadedPipeType(pipe.type);
       setExistingStepOutput(stepOutput);
       setCleanDataOutput(cleanOutput);
       setSplitDataOutput(splitOutput);
       setChooseTargetOutput(targetOutput);
-      if (targetOutput || splitOutput) setActiveStep("choose_target");
+      setTrainModelsOutput(trainOutput);
+      if (trainOutput || targetOutput) setActiveStep("train_models");
+      else if (splitOutput) setActiveStep("choose_target");
       else if (cleanOutput) setActiveStep("split_data");
       else if (stepOutput) setActiveStep("clean_data");
       if (stepOutput?.provider) setProvider(stepOutput.provider);
@@ -135,10 +139,11 @@ export function PipeBuilderPage() {
     return <p className="text-sm text-red-700">This builder needs an existing draft pipe. Start from Create a pipe.</p>;
   }
 
-  return <div className="grid gap-8 lg:grid-cols-[280px_1fr]"><aside className="rounded-3xl border border-black/10 bg-white/60 p-5"><p className="text-xs uppercase tracking-[0.2em] text-black/40">Builder steps</p><ol className="mt-4 space-y-3">{steps.map((step, idx) => { const isActive = (idx === 0 && activeStep === "select_dataset") || (idx === 1 && activeStep === "clean_data") || (idx === 2 && activeStep === "split_data") || (idx === 3 && activeStep === "choose_target"); const isCompleted = (idx === 0 && !!existingStepOutput) || (idx === 1 && !!cleanDataOutput) || (idx === 2 && !!splitDataOutput) || (idx === 3 && !!chooseTargetOutput); return <li key={step} className={`rounded-2xl px-3 py-2 text-sm ${isActive ? "bg-black text-white" : isCompleted ? "bg-emerald-500/10 text-emerald-800" : "text-black/60"}`}>{idx + 1}. {step}{isCompleted ? " — completed" : !isActive && idx > 3 ? " — coming soon" : ""}</li>; })}</ol></aside>
-    <div><Link to="/app/pipes" className="text-sm text-black/50 hover:text-black">← Back to pipes</Link><h1 className="mt-4 text-4xl font-semibold tracking-tight">{activeStep === "choose_target" ? "Step 4: Choose what to predict" : activeStep === "split_data" ? "Step 3: Split data" : activeStep === "clean_data" ? "Step 2: Clean data" : "Step 1: Select dataset"}</h1>{loadedPipeType ? <p className="mt-2 text-xs uppercase tracking-[0.16em] text-black/40">{loadedPipeType.replaceAll("_", " ")}</p> : null}<p className="mt-2 text-black/60">{activeStep === "choose_target" ? "Choose the column your pipe should learn to predict. MLP will detect whether this is a classification or regression problem." : activeStep === "split_data" ? "MLP will split your cleaned dataset into training, validation, and test sets before model training." : activeStep === "clean_data" ? "MLP checks your dataset for common issues and recommends safe fixes before training." : "Connect data, preview it, and confirm it is eligible for the MVP before continuing."}</p>
+  return <div className="grid gap-8 lg:grid-cols-[280px_1fr]"><aside className="rounded-3xl border border-black/10 bg-white/60 p-5"><p className="text-xs uppercase tracking-[0.2em] text-black/40">Builder steps</p><ol className="mt-4 space-y-3">{steps.map((step, idx) => { const isActive = (idx === 0 && activeStep === "select_dataset") || (idx === 1 && activeStep === "clean_data") || (idx === 2 && activeStep === "split_data") || (idx === 3 && activeStep === "choose_target") || (idx === 4 && activeStep === "train_models"); const isCompleted = (idx === 0 && !!existingStepOutput) || (idx === 1 && !!cleanDataOutput) || (idx === 2 && !!splitDataOutput) || (idx === 3 && !!chooseTargetOutput) || (idx === 4 && !!trainModelsOutput); return <li key={step} className={`rounded-2xl px-3 py-2 text-sm ${isActive ? "bg-black text-white" : isCompleted ? "bg-emerald-500/10 text-emerald-800" : "text-black/60"}`}>{idx + 1}. {step}{isCompleted ? " — completed" : !isActive && idx > 4 ? " — coming soon" : ""}</li>; })}</ol></aside>
+    <div><Link to="/app/pipes" className="text-sm text-black/50 hover:text-black">← Back to pipes</Link><h1 className="mt-4 text-4xl font-semibold tracking-tight">{activeStep === "train_models" ? "Step 5: Train models" : activeStep === "choose_target" ? "Step 4: Choose what to predict" : activeStep === "split_data" ? "Step 3: Split data" : activeStep === "clean_data" ? "Step 2: Clean data" : "Step 1: Select dataset"}</h1>{loadedPipeType ? <p className="mt-2 text-xs uppercase tracking-[0.16em] text-black/40">{loadedPipeType.replaceAll("_", " ")}</p> : null}<p className="mt-2 text-black/60">{activeStep === "train_models" ? "MLP will train and compare real baseline models, then recommend the best one." : activeStep === "choose_target" ? "Choose the column your pipe should learn to predict. MLP will detect whether this is a classification or regression problem." : activeStep === "split_data" ? "MLP will split your cleaned dataset into training, validation, and test sets before model training." : activeStep === "clean_data" ? "MLP checks your dataset for common issues and recommends safe fixes before training." : "Connect data, preview it, and confirm it is eligible for the MVP before continuing."}</p>
       {existingStepOutput && activeStep === "select_dataset" ? <section className="mt-6 rounded-3xl border border-emerald-200 bg-emerald-50 p-6"><h2 className="font-semibold text-emerald-900">Dataset selected</h2><p className="mt-2 text-sm text-emerald-800">This draft already has a dataset artifact. You can continue to the next step.</p><dl className="mt-4 grid gap-2 text-sm text-emerald-900"><div><dt className="font-medium">Provider</dt><dd>{existingStepOutput.provider}</dd></div><div><dt className="font-medium">Source</dt><dd>{existingStepOutput.source_label}</dd></div><div><dt className="font-medium">Rows</dt><dd>{existingStepOutput.row_count}</dd></div><div><dt className="font-medium">Columns</dt><dd>{existingStepOutput.column_count}</dd></div><div><dt className="font-medium">Dataset artifact ID</dt><dd className="font-mono text-xs">{existingStepOutput.dataset_artifact_id}</dd></div></dl><button type="button" onClick={() => setActiveStep("clean_data")} className="mt-5 rounded-full bg-black px-4 py-2 text-sm font-medium text-white">Continue to Clean data</button></section> : null}
-      {activeStep === "choose_target" ? <ChooseTargetStep pipeId={pipeId} pipeType={loadedPipeType} splitDataOutput={splitDataOutput} initialChooseTargetOutput={chooseTargetOutput} onCompleted={setChooseTargetOutput} onBackToSplitData={() => setActiveStep("split_data")} /> : null}
+      {activeStep === "train_models" ? <TrainModelsStep pipeId={pipeId} chooseTargetOutput={chooseTargetOutput} splitDataOutput={splitDataOutput} initialTrainModelsOutput={trainModelsOutput} onCompleted={setTrainModelsOutput} onBackToChooseTarget={() => setActiveStep("choose_target")} /> : null}
+      {activeStep === "choose_target" ? <ChooseTargetStep pipeId={pipeId} pipeType={loadedPipeType} splitDataOutput={splitDataOutput} initialChooseTargetOutput={chooseTargetOutput} onCompleted={(output) => { setChooseTargetOutput(output); setActiveStep("train_models"); }} onBackToSplitData={() => setActiveStep("split_data")} /> : null}
       {activeStep === "split_data" ? <SplitDatasetStep pipeId={pipeId} pipeType={loadedPipeType} cleanDataOutput={cleanDataOutput} initialSplitOutput={splitDataOutput} onCompleted={(output) => { setSplitDataOutput(output); setActiveStep("choose_target"); }} onBackToCleanData={() => setActiveStep("clean_data")} /> : null}
       {activeStep === "clean_data" ? <CleanDataStep pipeId={pipeId} selectDatasetOutput={existingStepOutput} initialCleanOutput={cleanDataOutput} onCompleted={(output) => { setCleanDataOutput(output); setActiveStep("split_data"); }} onBackToSelectDataset={() => setActiveStep("select_dataset")} /> : null}
       {!existingStepOutput && activeStep === "select_dataset" ? <><section className="mt-6 rounded-3xl border border-black/10 bg-white/60 p-6"><h2 className="font-semibold">1) Connect data</h2><div className="mt-4 grid gap-3 md:grid-cols-3">{(["huggingface", "airtable", "google_sheets"] as DatasetProvider[]).map((item) => <button key={item} onClick={() => { setProvider(item); setSelectedDatasetId(""); setRowsError(null); }} className={`rounded-2xl border px-4 py-3 text-left ${provider === item ? "border-black bg-white" : "border-black/10"}`}><p className="font-medium">{providerLabels[item]}</p><p className="text-xs text-black/50">{item === "huggingface" ? "Public datasets mode" : "Alpha mock, OAuth coming soon"}</p></button>)}</div>
