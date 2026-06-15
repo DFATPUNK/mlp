@@ -85,6 +85,22 @@ export type ChooseTargetStepOutput = {
   storage: { format: "json"; uri: string };
 };
 
+
+export type TrainModelsStepOutput = {
+  step_key: "train_models";
+  status: "completed";
+  trained_models_artifact_id: string;
+  previous_target_config_artifact_id: string;
+  task_type: "tabular_classification" | "tabular_regression";
+  target_column: string;
+  recommended_model_id: string;
+  recommended_model_name: string;
+  primary_metric_name: string;
+  primary_metric_value: number;
+  model_count: number;
+  storage: { format: "json"; uri: string };
+};
+
 export type ArtifactRecord = {
   id: string;
   content: unknown;
@@ -162,6 +178,11 @@ export async function getSplitDataStepOutput(pipeId: string): Promise<SplitDataS
 
 export async function getChooseTargetStepOutput(pipeId: string): Promise<ChooseTargetStepOutput | null> {
   return getStepOutput<ChooseTargetStepOutput>(pipeId, "choose_target");
+}
+
+
+export async function getTrainModelsStepOutput(pipeId: string): Promise<TrainModelsStepOutput | null> {
+  return getStepOutput<TrainModelsStepOutput>(pipeId, "train_models");
 }
 
 export async function getArtifactById(artifactId: string): Promise<ArtifactRecord | null> {
