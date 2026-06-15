@@ -480,7 +480,21 @@ def figure_to_base64(fig) -> str:
     return base64.b64encode(buffer.getvalue()).decode("ascii")
 
 
-def chart_payload(chart_key: str, title: str, kind: str, fig, description: str):
+def chart_payload(
+    chart_key: str,
+    title: str,
+    kind: str,
+    fig,
+    description: str,
+    how_to_read: str = "",
+    why_it_matters: str = "",
+    caveats: list[str] | None = None,
+    uses_all_validation_rows: bool = True,
+    shows_actual_labels: bool = False,
+    shows_model_predictions: bool = False,
+    shows_prediction_errors: bool = False,
+    shows_sample_only: bool = False,
+):
     return {
         "chart_key": chart_key,
         "title": title,
@@ -488,6 +502,14 @@ def chart_payload(chart_key: str, title: str, kind: str, fig, description: str):
         "image_format": "png_base64",
         "image_base64": figure_to_base64(fig),
         "description": description,
+        "how_to_read": how_to_read or description,
+        "why_it_matters": why_it_matters,
+        "caveats": caveats or [],
+        "uses_all_validation_rows": uses_all_validation_rows,
+        "shows_actual_labels": shows_actual_labels,
+        "shows_model_predictions": shows_model_predictions,
+        "shows_prediction_errors": shows_prediction_errors,
+        "shows_sample_only": shows_sample_only,
     }
 
 
@@ -498,69 +520,96 @@ def model_comparison_chart(models: list[dict[str, Any]], task_type: str):
     labels = [m.get("model_name", "Model") for m in completed]
     values = [float(m.get("primary_metric_value") or 0) for m in completed]
     metric = completed[0].get("primary_metric_name") or ("mae" if task_type == "tabular_regression" else "accuracy")
-    fig, ax = plt.subplots(figsize=(max(6, len(labels) * 1.7), 4))
-    ax.bar(labels, values, color="#111827")
+    fig, ax = plt.subplots(figsize=(8.5, 4.5))
+    ax.bar(labels, values, color="#111827", label=metric.replace("_", " "))
     ax.set_title("Model comparison")
     ax.set_ylabel(metric.replace("_", " "))
-    ax.tick_params(axis="x", rotation=20)
-    return chart_payload("model_comparison", "Model comparison", "bar", fig, "Compares the models that were actually trained on the validation metric.")
+    ax.tick_params(axis="x", rotation=18, labelsize=10)
+    ax.legend(loc="best")
+    return chart_payload(
+        "model_comparison",
+        "Model comparison",
+        "bar",
+        fig,
+        "Secondary view. Compares the models that were actually trained using their validation metric.",
+        how_to_read="Each bar is one trained model. Taller is better for classification metrics; lower-error regression models are summarized in the model table above.",
+        why_it_matters="This checks whether the recommended model was clearly better than the alternatives.",
+        caveats=["This repeats the metric comparison and should not be read as a separate evaluation."],
+        shows_model_predictions=True,
+    )
 
 
 def classification_charts(y_true, y_pred, models):
     charts = []
-    labels = sorted({str(v) for v in list(y_true) + list(y_pred)})
-    matrix = confusion_matrix([str(v) for v in y_true], [str(v) for v in y_pred], labels=labels)
+    true_labels = [str(v) for v in y_true]
+    pred_labels = [str(v) for v in y_pred]
+    labels = sorted({*true_labels, *pred_labels})
+    matrix = confusion_matrix(true_labels, pred_labels, labels=labels)
     row_totals = matrix.sum(axis=1)
-    fig, ax = plt.subplots(figsize=(max(5, len(labels) * 1.1), max(4.5, len(labels) * 1.0)))
+    fig, ax = plt.subplots(figsize=(max(7, len(labels) * 1.5), max(6, len(labels) * 1.2)))
     image = ax.imshow(matrix, cmap="Blues")
-    ax.set_title("Confusion matrix")
-    ax.set_xlabel("Model prediction")
-    ax.set_ylabel("Real value")
-    ax.set_xticks(range(len(labels)), labels=labels, rotation=45, ha="right")
-    ax.set_yticks(range(len(labels)), labels=labels)
+    ax.set_title("Confusion matrix", fontsize=16, pad=16)
+    ax.set_xlabel("Predicted class", fontsize=12)
+    ax.set_ylabel("Actual class", fontsize=12)
+    ax.set_xticks(range(len(labels)), labels=labels, rotation=35, ha="right", fontsize=10)
+    ax.set_yticks(range(len(labels)), labels=labels, fontsize=10)
     for i in range(matrix.shape[0]):
         for j in range(matrix.shape[1]):
             pct = (matrix[i, j] / row_totals[i] * 100) if row_totals[i] else 0
             if matrix.shape == (2, 2):
-                if i == j:
-                    plain = f"correct {labels[i]}"
-                else:
-                    plain = f"predicted {labels[j]}\nactually {labels[i]}"
-                text = f"{int(matrix[i, j])}\n{pct:.0f}%\n{plain}"
+                meaning = f"correct {labels[i]}" if i == j else f"predicted {labels[j]}\nactually {labels[i]}"
+                text = f"{int(matrix[i, j])} rows\n{pct:.0f}%\n{meaning}"
             else:
-                text = f"{int(matrix[i, j])}\n{pct:.0f}%"
-            ax.text(j, i, text, ha="center", va="center", color="#111827", fontsize=8)
-    fig.colorbar(image, ax=ax, fraction=0.046, pad=0.04)
+                meaning = "correct" if i == j else "mistake"
+                text = f"{int(matrix[i, j])} rows\n{pct:.0f}%\n{meaning}"
+            ax.text(j, i, text, ha="center", va="center", color="#111827", fontsize=9)
+    colorbar = fig.colorbar(image, ax=ax, fraction=0.046, pad=0.04)
+    colorbar.set_label("Validation rows")
     charts.append(chart_payload(
         "confusion_matrix",
         "Confusion matrix",
         "confusion_matrix",
         fig,
-        "Uses all validation rows. Rows are the real values and columns are model predictions. Diagonal cells are correct predictions; off-diagonal cells are mistakes.",
+        "Rows are the real labels. Columns are the model predictions. Diagonal cells are correct predictions; the other cells are mistakes.",
+        how_to_read="Rows are the real labels. Columns are the model predictions. The diagonal cells are correct predictions. The other cells are mistakes.",
+        why_it_matters="This shows exactly where the model is right and where it confuses one class for another.",
+        caveats=["Use this chart to understand mistakes, not just the overall score."],
+        shows_actual_labels=True,
+        shows_model_predictions=True,
+        shows_prediction_errors=True,
     ))
 
-    actual_counts = pd.Series(y_true).astype(str).value_counts().reindex(labels, fill_value=0)
-    predicted_counts = pd.Series(y_pred).astype(str).value_counts().reindex(labels, fill_value=0)
+    correct_by_actual = []
+    wrong_by_actual = []
+    for label in labels:
+        actual_mask = np.asarray(true_labels) == label
+        predicted_for_actual = np.asarray(pred_labels)[actual_mask]
+        correct_by_actual.append(int((predicted_for_actual == label).sum()))
+        wrong_by_actual.append(int((predicted_for_actual != label).sum()))
     x = np.arange(len(labels))
-    width = 0.38
-    fig, ax = plt.subplots(figsize=(max(6, len(labels) * 1.3), 4))
-    ax.bar(x - width / 2, actual_counts.values.tolist(), width, label="Actual labels", color="#047857")
-    ax.bar(x + width / 2, predicted_counts.values.tolist(), width, label="Model predictions", color="#2563eb")
-    ax.set_title("Actual vs predicted classes")
-    ax.set_ylabel("Validation row count")
+    fig, ax = plt.subplots(figsize=(max(7, len(labels) * 1.2), 4.8))
+    ax.bar(x, correct_by_actual, label="Correct predictions", color="#047857")
+    ax.bar(x, wrong_by_actual, bottom=correct_by_actual, label="Wrong predictions", color="#dc2626")
+    ax.set_title("Prediction outcomes by actual class", fontsize=15, pad=12)
+    ax.set_ylabel("Validation rows")
     ax.set_xticks(x, labels=labels, rotation=25, ha="right")
-    ax.legend()
+    ax.legend(loc="best")
     charts.append(chart_payload(
-        "actual_vs_predicted_classes",
-        "Actual vs predicted classes",
-        "bar",
+        "prediction_outcomes_by_actual_class",
+        "Prediction outcomes by actual class",
+        "stacked_bar",
         fig,
-        "Uses all validation rows. This compares the real labels in the validation set with the labels predicted by the model, so you can spot over-predicted or under-predicted classes.",
+        "Each bar starts from the real class. Green shows correct predictions and red shows mistakes.",
+        how_to_read="Each bar starts from the real class. The segments show how the model classified those rows.",
+        why_it_matters="This reveals whether the model struggles more with one class than another.",
+        caveats=["Unlike simple actual-vs-predicted totals, this chart does not hide mistakes that cancel each other out."],
+        shows_actual_labels=True,
+        shows_model_predictions=True,
+        shows_prediction_errors=True,
     ))
 
     comparison = model_comparison_chart(models, "tabular_classification")
     if comparison:
-        comparison["description"] = "Secondary view. Uses each model's real validation metric and repeats the comparison shown in the model table."
         charts.append(comparison)
     return charts
 
@@ -568,26 +617,72 @@ def classification_charts(y_true, y_pred, models):
 def regression_charts(y_true, y_pred, models):
     actual = np.asarray(y_true, dtype=float)
     predicted = np.asarray(y_pred, dtype=float)
-    residuals = actual - predicted
+    residuals = predicted - actual
+    absolute_errors = np.abs(residuals)
     charts = []
 
-    fig, ax = plt.subplots(figsize=(5, 5))
-    ax.scatter(actual, predicted, alpha=0.7, color="#111827")
+    fig, ax = plt.subplots(figsize=(7, 6))
+    ax.scatter(actual, predicted, alpha=0.72, color="#111827", label="Validation row")
     low = float(min(actual.min(), predicted.min()))
     high = float(max(actual.max(), predicted.max()))
-    ax.plot([low, high], [low, high], linestyle="--", color="#dc2626")
-    ax.set_title("Predicted vs actual")
-    ax.set_xlabel("Actual")
-    ax.set_ylabel("Predicted")
-    charts.append(chart_payload("predicted_vs_actual", "Predicted vs actual", "scatter", fig, "Shows how closely predictions follow the real validation values."))
+    ax.plot([low, high], [low, high], linestyle="--", color="#dc2626", label="Perfect prediction")
+    ax.set_title("Predicted vs actual", fontsize=15, pad=12)
+    ax.set_xlabel("Actual target")
+    ax.set_ylabel("Predicted target")
+    ax.legend(loc="best")
+    charts.append(chart_payload(
+        "predicted_vs_actual",
+        "Predicted vs actual",
+        "scatter",
+        fig,
+        "Points close to the diagonal are better predictions.",
+        how_to_read="Each point is one validation row. The diagonal line means a perfect prediction.",
+        why_it_matters="This shows whether predictions generally follow the real target values.",
+        caveats=["Outliers are not hidden; a few large errors can dominate the visual pattern."],
+        shows_actual_labels=True,
+        shows_model_predictions=True,
+    ))
 
-    fig, ax = plt.subplots(figsize=(6, 4))
-    ax.scatter(predicted, residuals, alpha=0.7, color="#7c3aed")
-    ax.axhline(0, linestyle="--", color="#111827")
-    ax.set_title("Residuals")
-    ax.set_xlabel("Predicted")
-    ax.set_ylabel("Actual minus predicted")
-    charts.append(chart_payload("residuals", "Residuals", "scatter", fig, "Shows whether prediction errors are centered around zero."))
+    fig, ax = plt.subplots(figsize=(7, 4.8))
+    ax.scatter(predicted, residuals, alpha=0.72, color="#7c3aed", label="Prediction error")
+    ax.axhline(0, linestyle="--", color="#111827", label="Zero error")
+    ax.set_title("Residuals", fontsize=15, pad=12)
+    ax.set_xlabel("Predicted target")
+    ax.set_ylabel("Prediction error (predicted − real)")
+    ax.legend(loc="best")
+    charts.append(chart_payload(
+        "residuals",
+        "Residuals",
+        "scatter",
+        fig,
+        "Prediction error means predicted value minus real value. Points close to zero are better.",
+        how_to_read="Each point is one validation row. Points above zero are over-predictions; points below zero are under-predictions.",
+        why_it_matters="This helps spot whether the model is consistently too high or too low for some predictions.",
+        caveats=["A few large errors can make the rest of the errors look smaller."],
+        shows_actual_labels=True,
+        shows_model_predictions=True,
+        shows_prediction_errors=True,
+    ))
+
+    fig, ax = plt.subplots(figsize=(7, 4.8))
+    ax.hist(absolute_errors, bins=min(20, max(5, int(np.sqrt(len(absolute_errors))))), color="#2563eb", alpha=0.82, label="Absolute error")
+    ax.set_title("Error distribution", fontsize=15, pad=12)
+    ax.set_xlabel("Absolute error")
+    ax.set_ylabel("Validation rows")
+    ax.legend(loc="best")
+    charts.append(chart_payload(
+        "error_distribution",
+        "Error distribution",
+        "histogram",
+        fig,
+        "Most errors should be close to zero.",
+        how_to_read="Bars near zero mean many predictions were close to the real value. Bars far from zero are larger mistakes.",
+        why_it_matters="This shows whether typical errors are small or whether a few large errors are common.",
+        caveats=["The units match the target column, so large or small depends on what you are predicting."],
+        shows_actual_labels=True,
+        shows_model_predictions=True,
+        shows_prediction_errors=True,
+    ))
 
     comparison = model_comparison_chart(models, "tabular_regression")
     if comparison:
@@ -608,27 +703,62 @@ def feature_importance_chart(pipeline, x_val: pd.DataFrame, y_val, task_type: st
         return None, []
     labels = [item["feature"] for item in reversed(top)]
     values = [item["importance"] for item in reversed(top)]
-    fig, ax = plt.subplots(figsize=(7, max(4, len(top) * 0.45)))
-    ax.barh(labels, values, color="#0f766e")
-    ax.set_title("What influenced the model most?")
-    ax.set_xlabel("Validation importance")
+    fig, ax = plt.subplots(figsize=(9, max(5, len(top) * 0.55)))
+    bars = ax.barh(labels, values, color="#0f766e", label="Validation importance")
+    ax.set_title("What influenced the model most?", fontsize=15, pad=12)
+    ax.set_xlabel("Change in validation score when shuffled")
+    ax.legend(loc="best")
+    for bar, value in zip(bars, values):
+        ax.text(bar.get_width(), bar.get_y() + bar.get_height() / 2, f" {value:.3f}", va="center", fontsize=9)
     chart = chart_payload(
         "feature_importance",
         "What influenced the model most?",
         "bar",
         fig,
-        "Uses all validation rows. These are the columns that changed the model's predictions the most when tested on validation data.",
+        "These are the columns that changed the model's validation score the most when their values were shuffled.",
+        how_to_read="Longer bars had a larger effect on the validation score when that column was shuffled.",
+        why_it_matters="This helps explain which input columns the recommended model relied on most.",
+        caveats=[
+            "Importance does not prove causation.",
+            "Correlated features can share importance.",
+            "This is measured on validation data, not on future production data.",
+        ],
+        shows_actual_labels=True,
+        shows_model_predictions=True,
     )
     return chart, importances
 
 
+def looks_id_like(feature: str, numeric: pd.Series, total_rows: int):
+    name = feature.lower().replace("_", "")
+    unique_ratio = numeric.nunique(dropna=True) / max(1, numeric.notna().sum())
+    return name == "id" or name.endswith("id") or (unique_ratio > 0.95 and numeric.notna().sum() > min(50, total_rows * 0.8))
+
+
 def choose_numeric_feature(importances: list[dict[str, Any]], x_val: pd.DataFrame):
     ordered = [item.get("feature") for item in importances] or list(x_val.columns)
+    minimum_non_null = min(20, max(5, len(x_val) // 3))
     for feature in ordered:
-        if feature in x_val.columns:
-            numeric = pd.to_numeric(x_val[feature], errors="coerce")
-            if numeric.notna().sum() >= max(3, min(10, len(x_val) // 5)) and numeric.nunique(dropna=True) > 2:
-                return feature, numeric
+        if feature not in x_val.columns:
+            continue
+        numeric = pd.to_numeric(x_val[feature], errors="coerce")
+        non_null = numeric.dropna()
+        if len(non_null) < minimum_non_null:
+            continue
+        if non_null.nunique() < min(8, max(3, len(non_null) // 3)):
+            continue
+        if looks_id_like(str(feature), non_null, len(x_val)):
+            continue
+        most_common_share = float(non_null.value_counts(normalize=True).iloc[0]) if not non_null.empty else 1.0
+        if most_common_share > 0.70:
+            continue
+        zero_share = float((non_null == 0).mean()) if len(non_null) else 1.0
+        if zero_share > 0.70:
+            continue
+        q10, q90 = non_null.quantile(0.10), non_null.quantile(0.90)
+        if q10 == q90:
+            continue
+        return feature, numeric
     return None, None
 
 
@@ -645,57 +775,79 @@ def positive_class_for_probabilities(pipeline, y_true):
 def feature_relationship_charts(pipeline, x_val: pd.DataFrame, y_val, y_pred, task_type: str, target_column: str, importances: list[dict[str, Any]]):
     feature, numeric_values = choose_numeric_feature(importances, x_val)
     if not feature or numeric_values is None:
-        return [], "No numeric feature was available for a feature relationship chart."
+        return [], "No numeric feature was varied enough to create a meaningful relationship chart."
+    valid_mask = numeric_values.notna()
+    x_feature = numeric_values.loc[valid_mask]
+    x_subset = x_val.loc[valid_mask]
+    y_subset = pd.Series(list(y_val), index=x_val.index).loc[valid_mask]
+    pred_subset = pd.Series(list(y_pred), index=x_val.index).loc[valid_mask]
     charts = []
     if task_type == "tabular_classification" and hasattr(pipeline, "predict_proba"):
         positive_label, positive_index = positive_class_for_probabilities(pipeline, y_val)
         if positive_label is not None and positive_index is not None:
-            probabilities = pipeline.predict_proba(x_val)[:, positive_index]
-            correctness = [str(a) == str(p) for a, p in zip(y_val, y_pred)]
-            colors = ["#047857" if ok else "#dc2626" for ok in correctness]
-            fig, ax = plt.subplots(figsize=(7, 4.5))
-            ax.scatter(numeric_values, probabilities, c=colors, alpha=0.72)
-            ax.set_title(f"How {feature} relates to the prediction")
+            probabilities = pipeline.predict_proba(x_subset)[:, positive_index]
+            correctness = [str(a) == str(p) for a, p in zip(y_subset, pred_subset)]
+            correct_mask = np.asarray(correctness)
+            fig, ax = plt.subplots(figsize=(9, 5.5))
+            ax.scatter(x_feature[correct_mask], probabilities[correct_mask], label="Correct prediction", color="#047857", alpha=0.72)
+            ax.scatter(x_feature[~correct_mask], probabilities[~correct_mask], label="Wrong prediction", color="#dc2626", alpha=0.82)
+            ax.set_title(f"How {feature} relates to the prediction", fontsize=15, pad=12)
             ax.set_xlabel(feature)
-            ax.set_ylabel(f"Confidence for {positive_label}")
+            ax.set_ylabel(f"Predicted probability of {positive_label}")
+            ax.legend(loc="best")
             charts.append(chart_payload(
                 "top_feature_relationship",
                 f"How {feature} relates to the prediction",
                 "scatter",
                 fig,
-                f"Uses all validation rows. Each point is a validation row. Higher points mean the model is more confident in predicting {positive_label}.",
+                f"Each point is one validation row. Higher points mean the model is more confident in predicting {positive_label}.",
+                how_to_read=f"Each point is one validation row. The x-axis is {feature}. The y-axis is how confident the model was that the row belongs to {positive_label}.",
+                why_it_matters="This helps you see whether the model's confidence changes as this feature changes.",
+                caveats=["This chart shows one feature at a time.", "The model may use many features together, so this is not a complete explanation of the model."],
+                shows_actual_labels=True,
+                shows_model_predictions=True,
+                shows_prediction_errors=True,
             ))
 
-            fig, ax = plt.subplots(figsize=(7, 4.5))
-            correct_values = numeric_values[pd.Series(correctness, index=numeric_values.index)]
-            incorrect_values = numeric_values[~pd.Series(correctness, index=numeric_values.index)]
-            ax.scatter(correct_values, np.zeros(len(correct_values)), label="Correct", color="#047857", alpha=0.65)
-            ax.scatter(incorrect_values, np.ones(len(incorrect_values)), label="Incorrect", color="#dc2626", alpha=0.8)
-            ax.set_yticks([0, 1], labels=["Correct", "Incorrect"])
+            fig, ax = plt.subplots(figsize=(9, 5.5))
+            ax.scatter(x_feature[correct_mask], probabilities[correct_mask], label="Correct prediction", color="#047857", alpha=0.68)
+            ax.scatter(x_feature[~correct_mask], probabilities[~correct_mask], label="Wrong prediction", color="#dc2626", alpha=0.85)
             ax.set_xlabel(feature)
-            ax.set_title("Where did the model make mistakes?")
-            ax.legend()
+            ax.set_ylabel(f"Predicted probability of {positive_label}")
+            ax.set_title("Where did the model make mistakes?", fontsize=15, pad=12)
+            ax.legend(loc="best")
             charts.append(chart_payload(
                 "mistakes_by_top_feature",
                 "Where did the model make mistakes?",
                 "scatter",
                 fig,
-                f"Uses all validation rows. This checks whether wrong predictions cluster around certain {feature} values.",
+                "Red points are validation rows the model predicted incorrectly.",
+                how_to_read="Red points are validation rows the model predicted incorrectly. Green points were predicted correctly.",
+                why_it_matters="If red points cluster in one area, the model may struggle with that type of example.",
+                caveats=["This chart uses one feature as the x-axis, but mistakes can depend on multiple features together."],
+                shows_actual_labels=True,
+                shows_model_predictions=True,
+                shows_prediction_errors=True,
             ))
     elif task_type == "tabular_regression":
-        fig, ax = plt.subplots(figsize=(7, 4.5))
-        ax.scatter(numeric_values, pd.to_numeric(y_val, errors="coerce"), alpha=0.58, label="Actual", color="#047857")
-        ax.scatter(numeric_values, pd.to_numeric(pd.Series(y_pred, index=numeric_values.index), errors="coerce"), alpha=0.58, label="Predicted", color="#2563eb")
-        ax.set_title(f"How {feature} relates to predicted {target_column}")
+        fig, ax = plt.subplots(figsize=(9, 5.5))
+        ax.scatter(x_feature, pd.to_numeric(y_subset, errors="coerce"), alpha=0.62, label="Actual target", color="#047857")
+        ax.scatter(x_feature, pd.to_numeric(pred_subset, errors="coerce"), alpha=0.62, label="Predicted target", color="#2563eb")
+        ax.set_title(f"How {feature} relates to predicted {target_column}", fontsize=15, pad=12)
         ax.set_xlabel(feature)
         ax.set_ylabel(target_column)
-        ax.legend()
+        ax.legend(loc="best")
         charts.append(chart_payload(
             "top_feature_relationship",
             f"How {feature} relates to predicted {target_column}",
             "scatter",
             fig,
-            "Uses all validation rows. Green points are actual values and blue points are model predictions for the same feature values.",
+            "Green points are actual values and blue points are model predictions for the same feature values.",
+            how_to_read=f"The x-axis is {feature}. Green points show real {target_column}; blue points show predicted {target_column}.",
+            why_it_matters="This helps you see whether predictions move with an important numeric feature.",
+            caveats=["This chart shows one feature at a time and does not hide outliers."],
+            shows_actual_labels=True,
+            shows_model_predictions=True,
         ))
     return charts, None
 
