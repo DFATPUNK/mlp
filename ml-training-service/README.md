@@ -86,3 +86,21 @@ Body:
 ```
 
 The service verifies the Supabase token, checks that the pipe belongs to the authenticated user, trains real scikit-learn models, persists a `trained_models` artifact, upserts `pipe_step_outputs` with `step_key = "train_models"`, and returns a training summary.
+
+## Review results endpoint
+
+`POST /review-results` generates the Step 6 review from an existing `trained_models` artifact. It does **not** retrain models. The service verifies the Supabase access token, checks pipe ownership, loads the recommended model bundle plus validation split, recomputes predictions for the recommended model only, generates matplotlib charts, and persists:
+
+- `artifacts.artifact_type = "review_results"`
+- `pipe_step_outputs.step_key = "review_results"`
+
+Request body:
+
+```json
+{
+  "pipe_id": "PIPE_ID",
+  "trained_models_artifact_id": "TRAINED_MODELS_ARTIFACT_ID"
+}
+```
+
+The response includes the recommended model summary, model comparison, validation notes, base64 PNG charts, prediction examples, and `review_results_artifact_id` for Step 7.

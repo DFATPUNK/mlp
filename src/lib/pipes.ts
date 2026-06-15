@@ -101,6 +101,19 @@ export type TrainModelsStepOutput = {
   storage: { format: "json"; uri: string };
 };
 
+
+
+export type ReviewResultsStepOutput = {
+  step_key: "review_results";
+  status: "completed";
+  review_results_artifact_id: string;
+  previous_trained_models_artifact_id: string;
+  recommended_model_name: string;
+  primary_metric_name: string;
+  primary_metric_value: number;
+  storage: { format: "json"; uri: string };
+};
+
 export type ArtifactRecord = {
   id: string;
   content: unknown;
@@ -183,6 +196,10 @@ export async function getChooseTargetStepOutput(pipeId: string): Promise<ChooseT
 
 export async function getTrainModelsStepOutput(pipeId: string): Promise<TrainModelsStepOutput | null> {
   return getStepOutput<TrainModelsStepOutput>(pipeId, "train_models");
+}
+
+export async function getReviewResultsStepOutput(pipeId: string): Promise<ReviewResultsStepOutput | null> {
+  return getStepOutput<ReviewResultsStepOutput>(pipeId, "review_results");
 }
 
 export async function getArtifactById(artifactId: string): Promise<ArtifactRecord | null> {
