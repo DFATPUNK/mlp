@@ -18,9 +18,13 @@ from sklearn.dummy import DummyClassifier, DummyRegressor
 from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
 from sklearn.impute import SimpleImputer
 from sklearn.linear_model import LogisticRegression, Ridge
-from sklearn.metrics import accuracy_score, f1_score, mean_absolute_error, r2_score
+from sklearn.metrics import accuracy_score, confusion_matrix, f1_score, mean_absolute_error, r2_score
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import OneHotEncoder, StandardScaler
+
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
 
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "").rstrip("/")
 SERVICE_ROLE_KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "")
@@ -271,6 +275,11 @@ class TrainModelsRequest(BaseModel):
     target_config_artifact_id: str
 
 
+class ReviewResultsRequest(BaseModel):
+    pipe_id: str
+    trained_models_artifact_id: str
+
+
 @app.get("/health")
 def health():
     return {"status": "ok"}
@@ -433,6 +442,332 @@ def train_models(request: TrainModelsRequest, authorization: str | None = Header
             "task_type": task_type,
             "target_column": target_column,
         }
+    except HTTPException:
+        raise
+    except requests.HTTPError as exc:
+        raise HTTPException(status_code=500, detail=f"Supabase request failed: {exc.response.text[:500]}") from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+def load_owned_pipe(pipe_id: str, user_id: str):
+    pipe = get_single("pipes", {"id": f"eq.{pipe_id}", "select": "id,owner_id"})
+    if not pipe or pipe.get("owner_id") != user_id:
+        raise HTTPException(status_code=403, detail="You do not have access to this pipe.")
+    return pipe
+
+
+def load_artifact(pipe_id: str, artifact_id: str, select: str = "id,content,metadata"):
+    artifact = get_single("artifacts", {"id": f"eq.{artifact_id}", "pipe_id": f"eq.{pipe_id}", "select": select})
+    if not artifact:
+        raise HTTPException(status_code=404, detail="Artifact was not found.")
+    return artifact
+
+
+def decode_recommended_pipeline(bundle: dict[str, Any]):
+    if not bundle or bundle.get("format") != "joblib_base64" or not bundle.get("value"):
+        raise ValueError("Recommended model bundle is missing from the training artifact.")
+    raw = base64.b64decode(bundle["value"])
+    return joblib.load(io.BytesIO(raw))
+
+
+def figure_to_base64(fig) -> str:
+    buffer = io.BytesIO()
+    fig.tight_layout()
+    fig.savefig(buffer, format="png", dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    return base64.b64encode(buffer.getvalue()).decode("ascii")
+
+
+def chart_payload(chart_key: str, title: str, kind: str, fig, description: str):
+    return {
+        "chart_key": chart_key,
+        "title": title,
+        "kind": kind,
+        "image_format": "png_base64",
+        "image_base64": figure_to_base64(fig),
+        "description": description,
+    }
+
+
+def model_comparison_chart(models: list[dict[str, Any]], task_type: str):
+    completed = [m for m in models if m.get("status") == "completed" and m.get("primary_metric_value") is not None]
+    if not completed:
+        return None
+    labels = [m.get("model_name", "Model") for m in completed]
+    values = [float(m.get("primary_metric_value") or 0) for m in completed]
+    metric = completed[0].get("primary_metric_name") or ("mae" if task_type == "tabular_regression" else "accuracy")
+    fig, ax = plt.subplots(figsize=(max(6, len(labels) * 1.7), 4))
+    ax.bar(labels, values, color="#111827")
+    ax.set_title("Model comparison")
+    ax.set_ylabel(metric.replace("_", " "))
+    ax.tick_params(axis="x", rotation=20)
+    return chart_payload("model_comparison", "Model comparison", "bar", fig, "Compares the models that were actually trained on the validation metric.")
+
+
+def classification_charts(y_true, y_pred, models):
+    charts = []
+    labels = sorted({str(v) for v in list(y_true) + list(y_pred)})
+    matrix = confusion_matrix([str(v) for v in y_true], [str(v) for v in y_pred], labels=labels)
+    fig, ax = plt.subplots(figsize=(max(4, len(labels) * 0.8), max(4, len(labels) * 0.8)))
+    image = ax.imshow(matrix, cmap="Blues")
+    ax.set_title("Confusion matrix")
+    ax.set_xlabel("Predicted")
+    ax.set_ylabel("Actual")
+    ax.set_xticks(range(len(labels)), labels=labels, rotation=45, ha="right")
+    ax.set_yticks(range(len(labels)), labels=labels)
+    for i in range(matrix.shape[0]):
+        for j in range(matrix.shape[1]):
+            ax.text(j, i, int(matrix[i, j]), ha="center", va="center", color="#111827")
+    fig.colorbar(image, ax=ax, fraction=0.046, pad=0.04)
+    charts.append(chart_payload("confusion_matrix", "Confusion matrix", "confusion_matrix", fig, "Shows where the recommended model is correct and where it makes mistakes."))
+
+    counts = pd.Series(y_true).astype(str).value_counts().sort_index()
+    fig, ax = plt.subplots(figsize=(max(5, len(counts) * 1.2), 4))
+    ax.bar(counts.index.tolist(), counts.values.tolist(), color="#047857")
+    ax.set_title("Validation class distribution")
+    ax.set_ylabel("Rows")
+    ax.tick_params(axis="x", rotation=25)
+    charts.append(chart_payload("validation_class_distribution", "Validation class distribution", "bar", fig, "Shows how many validation rows belong to each class."))
+
+    comparison = model_comparison_chart(models, "tabular_classification")
+    if comparison:
+        charts.append(comparison)
+    return charts
+
+
+def regression_charts(y_true, y_pred, models):
+    actual = np.asarray(y_true, dtype=float)
+    predicted = np.asarray(y_pred, dtype=float)
+    residuals = actual - predicted
+    charts = []
+
+    fig, ax = plt.subplots(figsize=(5, 5))
+    ax.scatter(actual, predicted, alpha=0.7, color="#111827")
+    low = float(min(actual.min(), predicted.min()))
+    high = float(max(actual.max(), predicted.max()))
+    ax.plot([low, high], [low, high], linestyle="--", color="#dc2626")
+    ax.set_title("Predicted vs actual")
+    ax.set_xlabel("Actual")
+    ax.set_ylabel("Predicted")
+    charts.append(chart_payload("predicted_vs_actual", "Predicted vs actual", "scatter", fig, "Shows how closely predictions follow the real validation values."))
+
+    fig, ax = plt.subplots(figsize=(6, 4))
+    ax.scatter(predicted, residuals, alpha=0.7, color="#7c3aed")
+    ax.axhline(0, linestyle="--", color="#111827")
+    ax.set_title("Residuals")
+    ax.set_xlabel("Predicted")
+    ax.set_ylabel("Actual minus predicted")
+    charts.append(chart_payload("residuals", "Residuals", "scatter", fig, "Shows whether prediction errors are centered around zero."))
+
+    comparison = model_comparison_chart(models, "tabular_regression")
+    if comparison:
+        charts.append(comparison)
+    return charts
+
+
+def review_notes(task_type: str, y_true, models: list[dict[str, Any]]):
+    notes = []
+    if len(y_true) < 30:
+        notes.append("The validation set is small, so results may change with more data.")
+    failed = [m.get("model_name") for m in models if m.get("status") == "failed"]
+    if failed:
+        notes.append(f"Some models could not be trained: {', '.join(failed)}.")
+    completed = [m for m in models if m.get("status") == "completed" and m.get("primary_metric_value") is not None]
+    if len(completed) >= 2:
+        reverse = task_type == "tabular_classification"
+        ordered = sorted(completed, key=lambda m: float(m.get("primary_metric_value") or 0), reverse=reverse)
+        if task_type == "tabular_regression":
+            ordered = sorted(completed, key=lambda m: float(m.get("metrics", {}).get("mae", float("inf"))))
+        first = float(ordered[0].get("primary_metric_value") or 0)
+        second = float(ordered[1].get("primary_metric_value") or 0)
+        if first and abs(first - second) / abs(first) < 0.05:
+            notes.append("The top models are close, so the recommendation is not dramatically better than the runner-up.")
+    if task_type == "tabular_classification":
+        counts = pd.Series(y_true).value_counts()
+        if len(counts) > 1 and counts.min() / counts.max() < 0.5:
+            notes.append("The validation data is imbalanced, so F1 score may be more useful than accuracy.")
+    return notes
+
+
+def plain_english_summary(task_type: str, recommended: dict[str, Any], notes: list[str]):
+    name = recommended.get("model_name", "The recommended model")
+    metric = recommended.get("primary_metric_name", "metric").replace("_", " ")
+    value = recommended.get("primary_metric_value")
+    metric_text = f" ({float(value):.3f})" if isinstance(value, (int, float)) and np.isfinite(value) else ""
+    if task_type == "tabular_classification":
+        summary = f"{name} is recommended because it achieved the best validation {metric}{metric_text} among the models tested. The confusion matrix shows which classes it predicts correctly and where mistakes happen."
+    else:
+        mae = (recommended.get("metrics") or {}).get("mae")
+        error_text = f" On average, predictions are off by about {float(mae):.2f} units." if isinstance(mae, (int, float)) and np.isfinite(mae) else ""
+        summary = f"{name} is recommended because it achieved the lowest average error on the validation data.{error_text} The predicted vs actual chart shows how closely predictions follow the real values."
+    if notes:
+        summary += " " + notes[0]
+    return summary
+
+
+def prediction_examples(val_df: pd.DataFrame, feature_columns: list[str], target_column: str, predictions, task_type: str):
+    visible_features = [col for col in feature_columns if col in val_df.columns and col != target_column][:5]
+    columns = visible_features + ["actual", "predicted"] + (["correct"] if task_type == "tabular_classification" else ["absolute_error"])
+    rows = []
+    for idx, (_, row) in enumerate(val_df.head(10).iterrows()):
+        actual = row[target_column]
+        predicted = predictions[idx]
+        item = {col: clean_json(row[col]) for col in visible_features}
+        item["actual"] = clean_json(actual)
+        item["predicted"] = clean_json(predicted)
+        if task_type == "tabular_classification":
+            item["correct"] = str(actual) == str(predicted)
+        else:
+            try:
+                item["absolute_error"] = clean_json(abs(float(actual) - float(predicted)))
+            except Exception:
+                item["absolute_error"] = None
+        rows.append(item)
+    return {"columns": columns, "rows": rows}
+
+
+@app.post("/review-results")
+def review_results(request: ReviewResultsRequest, authorization: str | None = Header(default=None)):
+    require_config()
+    user = require_user(authorization)
+
+    try:
+        load_owned_pipe(request.pipe_id, user["id"])
+        trained_artifact = load_artifact(request.pipe_id, request.trained_models_artifact_id)
+        trained_content = trained_artifact.get("content") or {}
+        target_artifact_id = trained_content.get("previous_target_config_artifact_id")
+        split_artifact_id = trained_content.get("previous_split_dataset_artifact_id")
+        if not target_artifact_id or not split_artifact_id:
+            raise HTTPException(status_code=400, detail="Training artifact is missing lineage metadata.")
+
+        target_artifact = load_artifact(request.pipe_id, target_artifact_id)
+        split_artifact = load_artifact(request.pipe_id, split_artifact_id)
+        target_config = target_artifact.get("content") or {}
+        split_content = split_artifact.get("content") or {}
+        validation_rows = (split_content.get("splits") or {}).get("validation") or []
+        if not validation_rows:
+            raise HTTPException(status_code=400, detail="Validation split is missing or empty.")
+
+        target_column = trained_content.get("target_column") or target_config.get("target_column")
+        task_type = trained_content.get("task_type") or target_config.get("detected_task_type")
+        feature_columns = trained_content.get("feature_columns") or target_config.get("feature_columns") or []
+        excluded_columns = trained_content.get("excluded_feature_columns") or target_config.get("excluded_feature_columns") or []
+        preprocessing = trained_content.get("preprocessing") or {}
+        usable_features = (preprocessing.get("numeric_columns") or []) + (preprocessing.get("categorical_columns") or []) + (preprocessing.get("boolean_columns") or [])
+        if not usable_features:
+            usable_features = [col for col in feature_columns if col not in set(excluded_columns)]
+        if task_type not in {"tabular_classification", "tabular_regression"} or not target_column:
+            raise HTTPException(status_code=400, detail="Training artifact is missing target or task metadata.")
+
+        val_df, dropped_val = rows_to_frame(validation_rows, target_column)
+        missing_features = [col for col in usable_features if col not in val_df.columns]
+        usable_features = [col for col in usable_features if col in val_df.columns]
+        if not usable_features or val_df.empty:
+            raise HTTPException(status_code=400, detail="Validation data is not usable for review.")
+        y_val = val_df[target_column]
+        if task_type == "tabular_regression":
+            y_numeric = pd.to_numeric(y_val, errors="coerce")
+            keep_val = ~y_numeric.isna()
+            dropped_val += int((~keep_val).sum())
+            val_df = val_df.loc[keep_val].copy()
+            y_val = y_numeric.loc[keep_val]
+        if val_df.empty:
+            raise HTTPException(status_code=400, detail="No validation rows remain after removing missing targets.")
+
+        pipeline = decode_recommended_pipeline(trained_content.get("recommended_model_bundle") or {})
+        x_val = val_df[usable_features]
+        predictions = pipeline.predict(x_val)
+        models = trained_content.get("models") or []
+        recommended_id = trained_content.get("recommended_model_id")
+        recommended = next((m for m in models if m.get("model_id") == recommended_id), None) or {}
+        if not recommended:
+            recommended = {
+                "model_id": recommended_id,
+                "model_name": trained_content.get("recommended_model_name", "Recommended model"),
+                "primary_metric_name": "mae" if task_type == "tabular_regression" else "accuracy",
+                "primary_metric_value": None,
+                "metrics": {},
+                "explanation": trained_content.get("recommendation_reason", "Recommended from the validation results."),
+                "pros": [],
+                "cons": [],
+                "warnings": [],
+            }
+        model_comparison = [{
+            "model_id": m.get("model_id"),
+            "model_name": m.get("model_name"),
+            "primary_metric_name": m.get("primary_metric_name"),
+            "primary_metric_value": m.get("primary_metric_value"),
+            "metrics": m.get("metrics") or {},
+            "training_time_ms": m.get("training_time_ms"),
+            "status": m.get("status"),
+        } for m in models]
+
+        notes = review_notes(task_type, y_val, models)
+        if missing_features:
+            notes.append(f"Some saved feature columns were not present in validation data: {', '.join(missing_features[:5])}.")
+        if dropped_val:
+            notes.append(f"{dropped_val} validation rows were skipped because the target was missing.")
+        if task_type == "tabular_classification":
+            charts = classification_charts(y_val, predictions, models)
+        else:
+            charts = regression_charts(y_val, predictions, models)
+
+        recommended_model = {
+            "model_id": recommended.get("model_id"),
+            "model_name": recommended.get("model_name") or trained_content.get("recommended_model_name"),
+            "primary_metric_name": recommended.get("primary_metric_name"),
+            "primary_metric_value": recommended.get("primary_metric_value"),
+            "metrics": recommended.get("metrics") or {},
+            "explanation": recommended.get("explanation") or trained_content.get("recommendation_reason") or "Recommended from the validation results.",
+            "pros": recommended.get("pros") or [],
+            "cons": recommended.get("cons") or [],
+            "warnings": recommended.get("warnings") or [],
+        }
+        content = clean_json({
+            "previous_trained_models_artifact_id": request.trained_models_artifact_id,
+            "task_type": task_type,
+            "target_column": target_column,
+            "recommended_model": recommended_model,
+            "model_comparison": model_comparison,
+            "plain_english_summary": plain_english_summary(task_type, recommended_model, notes),
+            "validation_summary": {"rows_evaluated": int(len(val_df)), "notes": notes},
+            "charts": charts,
+            "prediction_examples": prediction_examples(val_df, feature_columns, target_column, predictions, task_type),
+        })
+        artifact_payload = {
+            "pipe_id": request.pipe_id,
+            "artifact_type": "review_results",
+            "kind": "review_results",
+            "name": "Review results",
+            "content": content,
+            "metadata": {
+                "previous_trained_models_artifact_id": request.trained_models_artifact_id,
+                "task_type": task_type,
+                "target_column": target_column,
+                "recommended_model_name": recommended_model.get("model_name"),
+                "primary_metric_name": recommended_model.get("primary_metric_name"),
+                "primary_metric_value": recommended_model.get("primary_metric_value"),
+            },
+        }
+        artifact = rest_post("artifacts", artifact_payload)[0]
+        output = {
+            "step_key": "review_results",
+            "status": "completed",
+            "review_results_artifact_id": artifact["id"],
+            "previous_trained_models_artifact_id": request.trained_models_artifact_id,
+            "recommended_model_name": recommended_model.get("model_name"),
+            "primary_metric_name": recommended_model.get("primary_metric_name"),
+            "primary_metric_value": recommended_model.get("primary_metric_value"),
+            "storage": {"format": "json", "uri": f"artifact:{artifact['id']}"},
+        }
+        rest_post(
+            "pipe_step_outputs",
+            {"pipe_id": request.pipe_id, "step_key": "review_results", "artifact_id": artifact["id"], "status": "completed", "output": output},
+            params={"on_conflict": "pipe_id,step_key"},
+            prefer="resolution=merge-duplicates,return=representation",
+        )
+        return {"review_results_artifact_id": artifact["id"], **content}
     except HTTPException:
         raise
     except requests.HTTPError as exc:
