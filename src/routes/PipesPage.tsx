@@ -1,11 +1,11 @@
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { PipeCard } from "../components/PipeCard";
-import { deletePipe, getPipes } from "../lib/pipes";
+import { deletePipe, getPipesWithCardMetadata, updatePipeName, type PipeWithCardMetadata } from "../lib/pipes";
 import type { Pipe } from "../types/pipe";
 
 export function PipesPage() {
-  const [pipes, setPipes] = useState<Pipe[]>([]);
+  const [pipeItems, setPipeItems] = useState<PipeWithCardMetadata[]>([]);
   const [loading, setLoading] = useState(true);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [deletingPipeId, setDeletingPipeId] = useState<string | null>(null);
@@ -13,10 +13,10 @@ export function PipesPage() {
   useEffect(() => {
     let mounted = true;
 
-    getPipes()
+    getPipesWithCardMetadata()
       .then((items) => {
         if (!mounted) return;
-        setPipes(items);
+        setPipeItems(items);
       })
       .catch(() => {
         if (!mounted) return;
@@ -41,12 +41,17 @@ export function PipesPage() {
 
     try {
       await deletePipe(pipe.id);
-      setPipes((current) => current.filter((item) => item.id !== pipe.id));
+      setPipeItems((current) => current.filter((item) => item.pipe.id !== pipe.id));
     } catch {
       setErrorMessage("Unable to delete this pipe.");
     } finally {
       setDeletingPipeId(null);
     }
+  }
+
+  async function handleRenamePipe(pipe: Pipe, name: string) {
+    const updatedPipe = await updatePipeName(pipe.id, name);
+    setPipeItems((current) => current.map((item) => item.pipe.id === pipe.id ? { ...item, pipe: updatedPipe } : item));
   }
 
   return (
@@ -77,7 +82,7 @@ export function PipesPage() {
         <div className="mb-5 flex items-center justify-between">
           <h2 className="text-lg font-semibold">Production</h2>
           <span className="text-sm text-black/40">
-            {loading ? "Loading…" : `${pipes.length} pipe${pipes.length > 1 ? "s" : ""}`}
+            {loading ? "Loading…" : `${pipeItems.length} pipe${pipeItems.length > 1 ? "s" : ""}`}
           </span>
         </div>
 
@@ -87,11 +92,13 @@ export function PipesPage() {
 
         {!loading && !errorMessage ? (
           <div className="grid gap-5 md:grid-cols-2">
-            {pipes.map((pipe) => (
+            {pipeItems.map(({ pipe, metadata }) => (
               <PipeCard
                 key={pipe.id}
                 pipe={pipe}
+                metadata={metadata}
                 onDelete={handleDeletePipe}
+                onRename={handleRenamePipe}
                 deleting={deletingPipeId === pipe.id}
               />
             ))}

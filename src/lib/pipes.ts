@@ -114,11 +114,124 @@ export type ReviewResultsStepOutput = {
   storage: { format: "json"; uri: string };
 };
 
+
+
+export type BuilderStepKey =
+  | "select_dataset"
+  | "clean_data"
+  | "split_data"
+  | "choose_target"
+  | "train_models"
+  | "review_results"
+  | "test_prediction"
+  | "publish_pipe";
+
+export type PipeCardMetadata = {
+  completedStepCount: number;
+  totalStepCount: 8;
+  currentStepLabel: string;
+  nextStepLabel: string | null;
+  datasetLabel: string | null;
+  targetColumn: string | null;
+  taskType: string | null;
+  recommendedModelName: string | null;
+  primaryMetricName: string | null;
+  primaryMetricValue: number | null;
+  summary: string;
+};
+
+export type PipeWithCardMetadata = {
+  pipe: Pipe;
+  metadata: PipeCardMetadata;
+};
+
+type StepOutputRow = {
+  pipe_id: string;
+  step_key: BuilderStepKey | string;
+  status: string;
+  output: Record<string, unknown> | null;
+};
+
+const BUILDER_STEPS: Array<{ key: BuilderStepKey; label: string }> = [
+  { key: "select_dataset", label: "Select dataset" },
+  { key: "clean_data", label: "Clean data" },
+  { key: "split_data", label: "Split data" },
+  { key: "choose_target", label: "Choose target" },
+  { key: "train_models", label: "Train models" },
+  { key: "review_results", label: "Review results" },
+  { key: "test_prediction", label: "Test prediction" },
+  { key: "publish_pipe", label: "Publish pipe" },
+];
+
 export type ArtifactRecord = {
   id: string;
   content: unknown;
   metadata: Record<string, unknown> | null;
 };
+
+
+function asString(value: unknown): string | null {
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+function asNumber(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function predictionPhrase(datasetLabel: string | null, targetColumn: string | null): string | null {
+  if (!targetColumn) return null;
+  const dataset = (datasetLabel ?? "").toLowerCase();
+  const target = targetColumn.toLowerCase().replaceAll("_", "").replaceAll(".", "");
+  if (dataset.includes("adult") && target === "income") return "predict whether income is <=50K or >50K";
+  if (dataset.includes("heart") && ["hasheartdisease", "hashearthdisease", "target", "disease"].includes(target)) return "predict whether a patient may have heart disease";
+  if ((dataset.includes("ames") || dataset.includes("housing")) && ["saleprice", "salepriceusd", "price"].includes(target)) return "predict house sale price";
+  return `predict ${targetColumn}`;
+}
+
+function reviewingPhrase(datasetLabel: string | null, targetColumn: string | null): string {
+  const phrase = predictionPhrase(datasetLabel, targetColumn) ?? `predict ${targetColumn ?? "the target"}`;
+  return phrase.startsWith("predict ") ? phrase.replace("predict ", "predicting ") : phrase;
+}
+
+function buildPipeSummary(pipe: Pipe, metadata: Omit<PipeCardMetadata, "summary">): string {
+  const pipeKind = pipe.type === "tabular_regression" ? "regression" : pipe.type === "tabular_classification" ? "classification" : pipe.type.replaceAll("_", " ");
+  if (metadata.datasetLabel && metadata.targetColumn && metadata.recommendedModelName && metadata.completedStepCount >= 6) {
+    return `Reviewed ${metadata.recommendedModelName} on ${metadata.datasetLabel} for ${reviewingPhrase(metadata.datasetLabel, metadata.targetColumn)}.`;
+  }
+  if (metadata.datasetLabel && metadata.targetColumn && metadata.recommendedModelName) {
+    return `Trained on ${metadata.datasetLabel} to ${predictionPhrase(metadata.datasetLabel, metadata.targetColumn) ?? `predict ${metadata.targetColumn}`}. Recommended model: ${metadata.recommendedModelName}.`;
+  }
+  if (metadata.datasetLabel && metadata.targetColumn) {
+    return `Pipeline using ${metadata.datasetLabel} to ${predictionPhrase(metadata.datasetLabel, metadata.targetColumn) ?? `predict ${metadata.targetColumn}`}.`;
+  }
+  if (metadata.datasetLabel) {
+    return `Pipeline using ${metadata.datasetLabel}. Choose a target column next.`;
+  }
+  return `Draft ${pipeKind} pipe. Select a dataset to begin.`;
+}
+
+function buildPipeCardMetadata(pipe: Pipe, outputs: StepOutputRow[]): PipeCardMetadata {
+  const byStep = new Map(outputs.filter((row) => row.status === "completed").map((row) => [row.step_key, row.output ?? {}]));
+  const selectOutput = byStep.get("select_dataset") ?? {};
+  const targetOutput = byStep.get("choose_target") ?? {};
+  const trainOutput = byStep.get("train_models") ?? {};
+  const reviewOutput = byStep.get("review_results") ?? {};
+  const completedStepCount = BUILDER_STEPS.filter((step) => byStep.has(step.key)).length;
+  const firstIncomplete = BUILDER_STEPS.find((step) => !byStep.has(step.key));
+  const baseMetadata = {
+    completedStepCount,
+    totalStepCount: 8 as const,
+    currentStepLabel: firstIncomplete?.label ?? "Complete",
+    nextStepLabel: firstIncomplete?.label ?? null,
+    datasetLabel: asString(selectOutput.source_label),
+    targetColumn: asString(targetOutput.target_column),
+    taskType: asString(targetOutput.detected_task_type) ?? asString(trainOutput.task_type),
+    recommendedModelName: asString(reviewOutput.recommended_model_name) ?? asString(trainOutput.recommended_model_name),
+    primaryMetricName: asString(reviewOutput.primary_metric_name) ?? asString(trainOutput.primary_metric_name),
+    primaryMetricValue: asNumber(reviewOutput.primary_metric_value) ?? asNumber(trainOutput.primary_metric_value),
+  };
+  return { ...baseMetadata, summary: buildPipeSummary(pipe, baseMetadata) };
+}
 
 function mapPipe(pipe: PipeRow): Pipe {
   return {
@@ -137,11 +250,39 @@ export async function getPipes(): Promise<Pipe[]> {
   const { data, error } = await supabase
     .from("pipes")
     .select("id, name, description, type, status, is_template, created_at, updated_at")
-    .order("created_at", { ascending: true });
+    .order("updated_at", { ascending: false });
 
   if (error) throw error;
 
   return ((data ?? []) as PipeRow[]).map(mapPipe);
+}
+
+
+
+export async function getPipesWithCardMetadata(): Promise<PipeWithCardMetadata[]> {
+  const pipes = await getPipes();
+  const pipeIds = pipes.map((pipe) => pipe.id);
+  if (!pipeIds.length) return [];
+
+  const { data, error } = await supabase
+    .from("pipe_step_outputs")
+    .select("pipe_id, step_key, status, output")
+    .in("pipe_id", pipeIds)
+    .eq("status", "completed");
+
+  if (error) throw error;
+
+  const outputsByPipe = new Map<string, StepOutputRow[]>();
+  for (const row of (data ?? []) as StepOutputRow[]) {
+    const current = outputsByPipe.get(row.pipe_id) ?? [];
+    current.push(row);
+    outputsByPipe.set(row.pipe_id, current);
+  }
+
+  return pipes.map((pipe) => ({
+    pipe,
+    metadata: buildPipeCardMetadata(pipe, outputsByPipe.get(pipe.id) ?? []),
+  }));
 }
 
 export async function getPipeById(pipeId: string): Promise<Pipe | null> {
@@ -160,6 +301,21 @@ export async function getPipeById(pipeId: string): Promise<Pipe | null> {
 export async function deletePipe(pipeId: string): Promise<void> {
   const { error } = await supabase.from("pipes").delete().eq("id", pipeId);
   if (error) throw error;
+}
+
+export async function updatePipeName(pipeId: string, name: string): Promise<Pipe> {
+  const trimmed = name.trim();
+  if (!trimmed) throw new Error("Pipe name cannot be empty.");
+
+  const { data, error } = await supabase
+    .from("pipes")
+    .update({ name: trimmed })
+    .eq("id", pipeId)
+    .select("id, name, description, type, status, is_template, created_at, updated_at")
+    .single();
+
+  if (error) throw error;
+  return mapPipe(data as PipeRow);
 }
 
 export async function getStepOutput<T>(pipeId: string, stepKey: string): Promise<T | null> {
