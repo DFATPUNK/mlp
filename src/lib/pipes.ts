@@ -116,6 +116,19 @@ export type ReviewResultsStepOutput = {
 
 
 
+
+
+export type TestPredictionStepOutput = {
+  step_key: "test_prediction";
+  status: "completed";
+  test_prediction_artifact_id: string;
+  previous_review_results_artifact_id: string;
+  prediction: string | number | boolean;
+  confidence: number | null;
+  model_name: string;
+  storage: { format: "json"; uri: string };
+};
+
 export type BuilderStepKey =
   | "select_dataset"
   | "clean_data"
@@ -137,6 +150,7 @@ export type PipeCardMetadata = {
   recommendedModelName: string | null;
   primaryMetricName: string | null;
   primaryMetricValue: number | null;
+  lastPrediction: string | number | boolean | null;
   summary: string;
 };
 
@@ -195,6 +209,9 @@ function reviewingPhrase(datasetLabel: string | null, targetColumn: string | nul
 
 function buildPipeSummary(pipe: Pipe, metadata: Omit<PipeCardMetadata, "summary">): string {
   const pipeKind = pipe.type === "tabular_regression" ? "regression" : pipe.type === "tabular_classification" ? "classification" : pipe.type.replaceAll("_", " ");
+  if (metadata.lastPrediction !== null) {
+    return `Last tested prediction: ${String(metadata.lastPrediction)}.`;
+  }
   if (metadata.datasetLabel && metadata.targetColumn && metadata.recommendedModelName && metadata.completedStepCount >= 6) {
     return `Reviewed ${metadata.recommendedModelName} on ${metadata.datasetLabel} for ${reviewingPhrase(metadata.datasetLabel, metadata.targetColumn)}.`;
   }
@@ -216,6 +233,7 @@ function buildPipeCardMetadata(pipe: Pipe, outputs: StepOutputRow[]): PipeCardMe
   const targetOutput = byStep.get("choose_target") ?? {};
   const trainOutput = byStep.get("train_models") ?? {};
   const reviewOutput = byStep.get("review_results") ?? {};
+  const testOutput = byStep.get("test_prediction") ?? {};
   const completedStepCount = BUILDER_STEPS.filter((step) => byStep.has(step.key)).length;
   const firstIncomplete = BUILDER_STEPS.find((step) => !byStep.has(step.key));
   const baseMetadata = {
@@ -229,6 +247,7 @@ function buildPipeCardMetadata(pipe: Pipe, outputs: StepOutputRow[]): PipeCardMe
     recommendedModelName: asString(reviewOutput.recommended_model_name) ?? asString(trainOutput.recommended_model_name),
     primaryMetricName: asString(reviewOutput.primary_metric_name) ?? asString(trainOutput.primary_metric_name),
     primaryMetricValue: asNumber(reviewOutput.primary_metric_value) ?? asNumber(trainOutput.primary_metric_value),
+    lastPrediction: typeof testOutput.prediction === "string" || typeof testOutput.prediction === "number" || typeof testOutput.prediction === "boolean" ? testOutput.prediction : null,
   };
   return { ...baseMetadata, summary: buildPipeSummary(pipe, baseMetadata) };
 }
@@ -356,6 +375,10 @@ export async function getTrainModelsStepOutput(pipeId: string): Promise<TrainMod
 
 export async function getReviewResultsStepOutput(pipeId: string): Promise<ReviewResultsStepOutput | null> {
   return getStepOutput<ReviewResultsStepOutput>(pipeId, "review_results");
+}
+
+export async function getTestPredictionStepOutput(pipeId: string): Promise<TestPredictionStepOutput | null> {
+  return getStepOutput<TestPredictionStepOutput>(pipeId, "test_prediction");
 }
 
 export async function getArtifactById(artifactId: string): Promise<ArtifactRecord | null> {
