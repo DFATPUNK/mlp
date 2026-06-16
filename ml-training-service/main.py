@@ -281,6 +281,17 @@ class ReviewResultsRequest(BaseModel):
     trained_models_artifact_id: str
 
 
+class PredictionSchemaRequest(BaseModel):
+    pipe_id: str
+    review_results_artifact_id: str
+
+
+class TestPredictionRequest(BaseModel):
+    pipe_id: str
+    review_results_artifact_id: str
+    input: dict[str, Any]
+
+
 @app.get("/health")
 def health():
     return {"status": "ok"}
@@ -1065,6 +1076,268 @@ def review_results(request: ReviewResultsRequest, authorization: str | None = He
             prefer="resolution=merge-duplicates,return=representation",
         )
         return {"review_results_artifact_id": artifact["id"], **content}
+    except HTTPException:
+        raise
+    except requests.HTTPError as exc:
+        raise HTTPException(status_code=500, detail=f"Supabase request failed: {exc.response.text[:500]}") from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+def load_prediction_lineage(pipe_id: str, review_results_artifact_id: str):
+    review_artifact = load_artifact(pipe_id, review_results_artifact_id)
+    review_content = review_artifact.get("content") or {}
+    trained_artifact_id = review_content.get("previous_trained_models_artifact_id")
+    if not trained_artifact_id:
+        raise HTTPException(status_code=400, detail="Review results artifact is missing trained model lineage.")
+    trained_artifact = load_artifact(pipe_id, trained_artifact_id)
+    trained_content = trained_artifact.get("content") or {}
+    split_artifact = None
+    split_artifact_id = trained_content.get("previous_split_dataset_artifact_id")
+    if split_artifact_id:
+        split_artifact = load_artifact(pipe_id, split_artifact_id)
+    return review_artifact, trained_artifact_id, trained_content, split_artifact
+
+
+def usable_prediction_columns(trained_content: dict[str, Any]):
+    preprocessing = trained_content.get("preprocessing") or {}
+    numeric = [col for col in preprocessing.get("numeric_columns") or [] if isinstance(col, str)]
+    categorical = [col for col in preprocessing.get("categorical_columns") or [] if isinstance(col, str)]
+    boolean = [col for col in preprocessing.get("boolean_columns") or [] if isinstance(col, str)]
+    target_column = trained_content.get("target_column")
+    excluded = set(trained_content.get("excluded_feature_columns") or [])
+    dropped = set(preprocessing.get("dropped_columns") or [])
+    seen = set()
+    fields = []
+    for column_type, columns in [("number", numeric), ("text", categorical), ("boolean", boolean)]:
+        for name in columns:
+            if name == target_column or name in excluded or name in dropped or name in seen:
+                continue
+            seen.add(name)
+            fields.append({"name": name, "type": column_type})
+    return fields
+
+
+def example_for_column(rows: list[dict[str, Any]], column: str, column_type: str):
+    values = [row.get(column) for row in rows if isinstance(row, dict) and not is_missing_target(row.get(column))]
+    if not values:
+        return None
+    if column_type == "number":
+        numeric = pd.to_numeric(pd.Series(values), errors="coerce").dropna()
+        if numeric.empty:
+            return None
+        return clean_json(float(numeric.median()))
+    if column_type == "boolean":
+        normalized = []
+        for value in values:
+            if isinstance(value, bool):
+                normalized.append(value)
+            elif isinstance(value, str):
+                lowered = value.strip().lower()
+                if lowered in {"true", "1", "yes", "y"}:
+                    normalized.append(True)
+                elif lowered in {"false", "0", "no", "n"}:
+                    normalized.append(False)
+        if not normalized:
+            return None
+        return bool(pd.Series(normalized).mode(dropna=True).iloc[0])
+    mode = pd.Series([str(value) for value in values]).mode(dropna=True)
+    return clean_json(mode.iloc[0] if not mode.empty else values[0])
+
+
+def build_prediction_input_schema(trained_content: dict[str, Any], split_artifact: dict[str, Any] | None):
+    split_content = (split_artifact or {}).get("content") or {}
+    splits = split_content.get("splits") or {}
+    sample_rows = (splits.get("validation") or []) + (splits.get("train") or [])
+    fields = []
+    for field in usable_prediction_columns(trained_content):
+        name = field["name"]
+        field_type = field["type"]
+        fields.append({
+            "name": name,
+            "label": name,
+            "type": field_type,
+            "required": False,
+            "example": example_for_column(sample_rows, name, field_type),
+            "helper_text": {
+                "number": "Numeric input used by the model.",
+                "text": "Categorical input used by the model.",
+                "boolean": "Boolean input used by the model.",
+            }[field_type],
+        })
+    return {"fields": fields}
+
+
+def coerce_prediction_input(raw_input: dict[str, Any], fields: list[dict[str, Any]]):
+    if not isinstance(raw_input, dict):
+        raise HTTPException(status_code=400, detail="Prediction input must be a JSON object.")
+    row = {}
+    for field in fields:
+        name = field["name"]
+        value = raw_input.get(name)
+        if value == "":
+            value = None
+        if value is None:
+            row[name] = None
+            continue
+        if field["type"] == "number":
+            try:
+                row[name] = float(value)
+            except (TypeError, ValueError) as exc:
+                raise HTTPException(status_code=400, detail=f"{name} must be a number.") from exc
+        elif field["type"] == "boolean":
+            if isinstance(value, bool):
+                row[name] = value
+            elif isinstance(value, str):
+                lowered = value.strip().lower()
+                if lowered in {"true", "1", "yes", "y", "on"}:
+                    row[name] = True
+                elif lowered in {"false", "0", "no", "n", "off"}:
+                    row[name] = False
+                else:
+                    raise HTTPException(status_code=400, detail=f"{name} must be true or false.")
+            else:
+                row[name] = bool(value)
+        else:
+            row[name] = str(value)
+    return row
+
+
+def class_probabilities_for_pipeline(pipeline, frame: pd.DataFrame):
+    if not hasattr(pipeline, "predict_proba"):
+        return None, None
+    probabilities = pipeline.predict_proba(frame)[0]
+    model = getattr(pipeline, "named_steps", {}).get("model")
+    classes = [clean_json(item) for item in getattr(model, "classes_", [])]
+    if not classes:
+        return None, None
+    class_probabilities = {str(label): clean_json(prob) for label, prob in zip(classes, probabilities)}
+    confidence = float(np.max(probabilities)) if len(probabilities) else None
+    return class_probabilities, confidence
+
+
+def build_plain_prediction_result(task_type: str, prediction_value: Any, confidence: float | None):
+    if task_type == "tabular_classification":
+        if confidence is not None:
+            return f"For this input, the model predicts {prediction_value} with {confidence * 100:.0f}% confidence."
+        return f"For this input, the model predicts {prediction_value}."
+    return f"For this input, the model predicts a value of {prediction_value}."
+
+
+@app.post("/test-prediction-schema")
+def prediction_schema(request: PredictionSchemaRequest, authorization: str | None = Header(default=None)):
+    require_config()
+    user = require_user(authorization)
+    try:
+        load_owned_pipe(request.pipe_id, user["id"])
+        _, trained_artifact_id, trained_content, split_artifact = load_prediction_lineage(request.pipe_id, request.review_results_artifact_id)
+        schema = build_prediction_input_schema(trained_content, split_artifact)
+        return {
+            "previous_trained_models_artifact_id": trained_artifact_id,
+            "task_type": trained_content.get("task_type"),
+            "target_column": trained_content.get("target_column"),
+            "model": {
+                "model_id": trained_content.get("recommended_model_id"),
+                "model_name": trained_content.get("recommended_model_name"),
+            },
+            "input_schema": schema,
+        }
+    except HTTPException:
+        raise
+    except requests.HTTPError as exc:
+        raise HTTPException(status_code=500, detail=f"Supabase request failed: {exc.response.text[:500]}") from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.post("/test-prediction")
+def test_prediction(request: TestPredictionRequest, authorization: str | None = Header(default=None)):
+    require_config()
+    user = require_user(authorization)
+    try:
+        load_owned_pipe(request.pipe_id, user["id"])
+        _, trained_artifact_id, trained_content, split_artifact = load_prediction_lineage(request.pipe_id, request.review_results_artifact_id)
+        task_type = trained_content.get("task_type")
+        target_column = trained_content.get("target_column")
+        if task_type not in {"tabular_classification", "tabular_regression"} or not target_column:
+            raise HTTPException(status_code=400, detail="Unsupported or missing task metadata.")
+        schema = build_prediction_input_schema(trained_content, split_artifact)
+        fields = schema.get("fields") or []
+        if not fields:
+            raise HTTPException(status_code=400, detail="No usable input fields were found for this trained model.")
+        row = coerce_prediction_input(request.input, fields)
+        frame = pd.DataFrame([row], columns=[field["name"] for field in fields])
+        pipeline = decode_recommended_pipeline(trained_content.get("recommended_model_bundle") or {})
+        prediction_raw = pipeline.predict(frame)[0]
+        prediction_value = clean_json(prediction_raw)
+        class_probabilities, confidence = (None, None)
+        if task_type == "tabular_classification":
+            class_probabilities, confidence = class_probabilities_for_pipeline(pipeline, frame)
+        model = {
+            "model_id": trained_content.get("recommended_model_id"),
+            "model_name": trained_content.get("recommended_model_name"),
+        }
+        prediction = {
+            "value": prediction_value,
+            "label": str(prediction_value),
+            "confidence": clean_json(confidence),
+            "class_probabilities": clean_json(class_probabilities),
+        }
+        mappable_output = {
+            "prediction": prediction_value,
+            "confidence": clean_json(confidence),
+            "class_probabilities": clean_json(class_probabilities),
+            "model_name": model.get("model_name"),
+            "pipe_id": request.pipe_id,
+            "pipe_version": "draft",
+        }
+        plain_result = build_plain_prediction_result(task_type, prediction_value, confidence)
+        content = clean_json({
+            "previous_review_results_artifact_id": request.review_results_artifact_id,
+            "previous_trained_models_artifact_id": trained_artifact_id,
+            "task_type": task_type,
+            "target_column": target_column,
+            "model": model,
+            "input_schema": schema,
+            "input": row,
+            "prediction": prediction,
+            "plain_english_result": plain_result,
+            "mappable_output": mappable_output,
+        })
+        artifact_payload = {
+            "pipe_id": request.pipe_id,
+            "artifact_type": "test_prediction",
+            "kind": "test_prediction",
+            "name": "Test prediction",
+            "content": content,
+            "metadata": {
+                "previous_review_results_artifact_id": request.review_results_artifact_id,
+                "previous_trained_models_artifact_id": trained_artifact_id,
+                "task_type": task_type,
+                "target_column": target_column,
+                "model_name": model.get("model_name"),
+                "prediction": prediction_value,
+                "confidence": clean_json(confidence),
+            },
+        }
+        artifact = rest_post("artifacts", artifact_payload)[0]
+        output = {
+            "step_key": "test_prediction",
+            "status": "completed",
+            "test_prediction_artifact_id": artifact["id"],
+            "previous_review_results_artifact_id": request.review_results_artifact_id,
+            "prediction": prediction_value,
+            "confidence": clean_json(confidence),
+            "model_name": model.get("model_name"),
+            "storage": {"format": "json", "uri": f"artifact:{artifact['id']}"},
+        }
+        rest_post(
+            "pipe_step_outputs",
+            {"pipe_id": request.pipe_id, "step_key": "test_prediction", "artifact_id": artifact["id"], "status": "completed", "output": output},
+            params={"on_conflict": "pipe_id,step_key"},
+            prefer="resolution=merge-duplicates,return=representation",
+        )
+        return {"test_prediction_artifact_id": artifact["id"], **content}
     except HTTPException:
         raise
     except requests.HTTPError as exc:
