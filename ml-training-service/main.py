@@ -290,9 +290,17 @@ class PredictionSchemaRequest(BaseModel):
 class TestPredictionSampleRequest(BaseModel):
     pipe_id: str
     review_results_artifact_id: str
+    exclude_validation_row_indices: list[int] | None = None
 
 
 class TestPredictionRequest(BaseModel):
+    pipe_id: str
+    review_results_artifact_id: str
+    input: dict[str, Any]
+    sample_context: dict[str, Any] | None = None
+
+
+class ExplainPredictionRequest(BaseModel):
     pipe_id: str
     review_results_artifact_id: str
     input: dict[str, Any]
@@ -1174,7 +1182,21 @@ def build_prediction_input_schema(trained_content: dict[str, Any], split_artifac
     return {"fields": fields}
 
 
-def sample_validation_input(trained_content: dict[str, Any], split_artifact: dict[str, Any] | None):
+def split_counts_and_ratios(split_artifact: dict[str, Any] | None):
+    split_content = (split_artifact or {}).get("content") or {}
+    splits = split_content.get("splits") or {}
+    train_count = len(splits.get("train") or [])
+    validation_count = len(splits.get("validation") or [])
+    test_count = len(splits.get("test") or [])
+    total = train_count + validation_count + test_count
+    counts = {"training": train_count, "validation": validation_count, "test": test_count, "total": total}
+    ratios = None
+    if total > 0:
+        ratios = {"training": train_count / total, "validation": validation_count / total, "test": test_count / total}
+    return counts, ratios
+
+
+def sample_validation_input(trained_content: dict[str, Any], split_artifact: dict[str, Any] | None, exclude_indices: list[int] | None = None):
     target_column = trained_content.get("target_column")
     split_content = (split_artifact or {}).get("content") or {}
     splits = split_content.get("splits") or {}
@@ -1184,13 +1206,129 @@ def sample_validation_input(trained_content: dict[str, Any], split_artifact: dic
     fields = usable_prediction_columns(trained_content)
     if not fields:
         raise HTTPException(status_code=400, detail="No usable input fields were found for this trained model.")
-    candidate_rows = [row for row in validation_rows if any(field["name"] in row for field in fields)]
-    if not candidate_rows:
+    candidates = [(index, row) for index, row in enumerate(validation_rows) if any(field["name"] in row for field in fields)]
+    if not candidates:
         raise HTTPException(status_code=400, detail="No validation rows contain usable input fields for sample prediction.")
-    sample = random.choice(candidate_rows)
+    excluded = {index for index in (exclude_indices or []) if isinstance(index, int)}
+    available = [(index, row) for index, row in candidates if index not in excluded]
+    sample_index, sample = random.choice(available or candidates)
     input_row = {field["name"]: clean_json(sample.get(field["name"])) for field in fields}
-    actual_value = clean_json(sample.get(target_column)) if target_column else None
-    return input_row, {"target_column": target_column, "value": actual_value}
+    counts, ratios = split_counts_and_ratios(split_artifact)
+    sample_context = {
+        "kind": "validation_row",
+        "validation_row_index": sample_index,
+        "validation_row_number": sample_index + 1,
+        "validation_rows_total": len(validation_rows),
+        "target_is_available_after_prediction": bool(target_column and target_column in sample),
+        "split_counts": counts,
+        "split_ratios": clean_json(ratios),
+    }
+    return input_row, sample_context
+
+
+def normalize_prediction_value(value: Any, field_type: str):
+    if value == "" or value is None or (isinstance(value, float) and np.isnan(value)):
+        return None
+    if field_type == "number":
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+    if field_type == "boolean":
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            lowered = value.strip().lower()
+            if lowered in {"true", "1", "yes", "y", "on"}:
+                return True
+            if lowered in {"false", "0", "no", "n", "off"}:
+                return False
+        return bool(value)
+    return str(value).strip().lower()
+
+
+def prediction_values_match(left: Any, right: Any, field_type: str):
+    normalized_left = normalize_prediction_value(left, field_type)
+    normalized_right = normalize_prediction_value(right, field_type)
+    if normalized_left is None or normalized_right is None:
+        return normalized_left is None and normalized_right is None
+    if field_type == "number":
+        return bool(np.isclose(normalized_left, normalized_right, equal_nan=True))
+    return normalized_left == normalized_right
+
+
+def validation_row_for_context(split_artifact: dict[str, Any] | None, sample_context: dict[str, Any] | None):
+    if not sample_context or sample_context.get("kind") != "validation_row":
+        return None, None
+    index = sample_context.get("validation_row_index")
+    if not isinstance(index, int):
+        return None, None
+    split_content = (split_artifact or {}).get("content") or {}
+    validation_rows = [row for row in ((split_content.get("splits") or {}).get("validation") or []) if isinstance(row, dict)]
+    if index < 0 or index >= len(validation_rows):
+        return None, None
+    return index, validation_rows[index]
+
+
+def build_prediction_provenance_and_ground_truth(
+    task_type: str,
+    target_column: str,
+    prediction_value: Any,
+    row: dict[str, Any],
+    fields: list[dict[str, Any]],
+    split_artifact: dict[str, Any] | None,
+    sample_context: dict[str, Any] | None,
+):
+    counts, ratios = split_counts_and_ratios(split_artifact)
+    validation_index, validation_row = validation_row_for_context(split_artifact, sample_context)
+    validation_rows_total = counts.get("validation") if counts else None
+    matched_validation_row = False
+    if validation_row is not None:
+        matched_validation_row = all(prediction_values_match(row.get(field["name"]), validation_row.get(field["name"]), field["type"]) for field in fields)
+    if matched_validation_row and validation_row is not None and target_column in validation_row:
+        actual_value = clean_json(validation_row.get(target_column))
+        matches_prediction = None
+        absolute_error = None
+        if task_type == "tabular_classification":
+            matches_prediction = prediction_values_match(prediction_value, actual_value, "text")
+        else:
+            predicted_number = normalize_prediction_value(prediction_value, "number")
+            actual_number = normalize_prediction_value(actual_value, "number")
+            if predicted_number is not None and actual_number is not None:
+                absolute_error = abs(predicted_number - actual_number)
+        provenance = {
+            "kind": "validation_row",
+            "validation_row_number": validation_index + 1 if validation_index is not None else None,
+            "validation_rows_total": validation_rows_total,
+            "split_counts": counts,
+            "split_ratios": clean_json(ratios),
+            "message": "This example comes from the validation split and was not used to train the model.",
+        }
+        ground_truth = {
+            "available": True,
+            "target_column": target_column,
+            "actual_value": actual_value,
+            "matches_prediction": matches_prediction,
+            "absolute_error": clean_json(absolute_error),
+        }
+        return provenance, ground_truth
+    message = "You changed the sampled values, so this is now a custom input. There is no known answer to compare against." if sample_context else "This is a custom input. There is no known answer to compare against."
+    provenance = {
+        "kind": "custom_input",
+        "validation_row_number": None,
+        "validation_rows_total": validation_rows_total,
+        "split_counts": counts if counts.get("total") else None,
+        "split_ratios": clean_json(ratios),
+        "message": message,
+    }
+    ground_truth = {
+        "available": False,
+        "target_column": target_column,
+        "actual_value": None,
+        "matches_prediction": None,
+        "absolute_error": None,
+    }
+    return provenance, ground_truth
 
 
 def coerce_prediction_input(raw_input: dict[str, Any], fields: list[dict[str, Any]]):
@@ -1249,6 +1387,232 @@ def build_plain_prediction_result(task_type: str, prediction_value: Any, confide
     return f"For this input, the model predicts a value of {prediction_value}."
 
 
+
+def display_feature_name(name: str):
+    return str(name).replace("num__", "").replace("cat__", "").replace("bool__", "").replace("remainder__", "").replace("__", " ").replace("_", " ").replace(".", " ").strip().title()
+
+
+def transformed_feature_names(preprocessor, trained_content: dict[str, Any]):
+    try:
+        raw_names = [str(name) for name in preprocessor.get_feature_names_out()]
+    except Exception:
+        raw_names = []
+    if not raw_names:
+        return []
+    original_columns = []
+    preprocessing = trained_content.get("preprocessing") or {}
+    for key in ["numeric_columns", "categorical_columns", "boolean_columns"]:
+        original_columns.extend([col for col in preprocessing.get(key) or [] if isinstance(col, str)])
+    mapped = []
+    for raw_name in raw_names:
+        stripped = raw_name.split("__", 1)[1] if "__" in raw_name else raw_name
+        original_match = next((col for col in original_columns if stripped == col or stripped.startswith(f"{col}_") or stripped.startswith(f"{col}=")), None)
+        mapped.append({
+            "raw": raw_name,
+            "display": display_feature_name(original_match or stripped),
+            "original": original_match,
+        })
+    return mapped
+
+
+def dense_transformed_input(pipeline, frame: pd.DataFrame):
+    preprocessor = getattr(pipeline, "named_steps", {}).get("preprocess")
+    if preprocessor is None:
+        raise HTTPException(status_code=400, detail="This model pipeline does not contain a preprocessing step.")
+    transformed = preprocessor.transform(frame)
+    if hasattr(transformed, "toarray"):
+        transformed = transformed.toarray()
+    return np.asarray(transformed), preprocessor
+
+
+def prediction_payload_for_pipeline(task_type: str, pipeline, frame: pd.DataFrame):
+    prediction_raw = pipeline.predict(frame)[0]
+    prediction_value = clean_json(prediction_raw)
+    class_probabilities, confidence = (None, None)
+    if task_type == "tabular_classification":
+        class_probabilities, confidence = class_probabilities_for_pipeline(pipeline, frame)
+    return {
+        "value": prediction_value,
+        "label": str(prediction_value),
+        "confidence": clean_json(confidence),
+        "class_probabilities": clean_json(class_probabilities),
+    }
+
+
+def tree_decision_path(estimator, transformed_input, feature_info: list[dict[str, Any]], tree_prediction: Any, max_visible: int = 8):
+    tree = estimator.tree_
+    node_indicator = estimator.decision_path(transformed_input)
+    leaf_id = estimator.apply(transformed_input)[0]
+    node_ids = node_indicator.indices[node_indicator.indptr[0]:node_indicator.indptr[1]]
+    split_nodes = [node_id for node_id in node_ids if node_id != leaf_id and tree.feature[node_id] >= 0]
+    visible_nodes = split_nodes
+    omitted_count = 0
+    if len(split_nodes) > max_visible:
+        visible_nodes = split_nodes[: max_visible - 1] + [split_nodes[-1]]
+        omitted_count = len(split_nodes) - len(visible_nodes)
+    steps = []
+    for step_number, node_id in enumerate(visible_nodes, start=1):
+        feature_index = int(tree.feature[node_id])
+        threshold = float(tree.threshold[node_id])
+        input_value = clean_json(transformed_input[0, feature_index])
+        outcome = bool(transformed_input[0, feature_index] <= threshold)
+        operator = "<=" if outcome else ">"
+        feature_name = feature_info[feature_index]["display"] if feature_index < len(feature_info) else f"Technical feature {feature_index}"
+        steps.append({
+            "step": step_number,
+            "feature": feature_name,
+            "operator": operator,
+            "threshold": clean_json(threshold),
+            "input_value": input_value,
+            "outcome": outcome,
+            "display_text": f"{feature_name} {operator} {threshold:.3g} → {'yes' if outcome else 'no'}",
+        })
+    return steps, omitted_count, clean_json(tree_prediction)
+
+
+def features_consulted_for_forest(forest, transformed_input, feature_info: list[dict[str, Any]]):
+    counts: dict[str, int] = {}
+    for estimator in forest.estimators_[:50]:
+        tree = estimator.tree_
+        node_indicator = estimator.decision_path(transformed_input)
+        leaf_id = estimator.apply(transformed_input)[0]
+        node_ids = node_indicator.indices[node_indicator.indptr[0]:node_indicator.indptr[1]]
+        features = set()
+        for node_id in node_ids:
+            if node_id == leaf_id or tree.feature[node_id] < 0:
+                continue
+            feature_index = int(tree.feature[node_id])
+            feature_name = feature_info[feature_index]["display"] if feature_index < len(feature_info) else f"Technical feature {feature_index}"
+            features.add(feature_name)
+        for feature_name in features:
+            counts[feature_name] = counts.get(feature_name, 0) + 1
+    tree_count = min(len(forest.estimators_), 50)
+    ranked = sorted(counts.items(), key=lambda item: (-item[1], item[0]))[:8]
+    return [{"feature": feature, "trees_used": used, "tree_count": tree_count, "share_of_trees": clean_json(used / tree_count if tree_count else 0)} for feature, used in ranked]
+
+
+def representative_detail(estimator, transformed_input, feature_info, tree_index: int, role: str, prediction: Any, agrees: bool, confidence: float | None):
+    path, omitted_count, clean_prediction = tree_decision_path(estimator, transformed_input, feature_info, prediction)
+    return {
+        "tree_index": tree_index,
+        "role": role,
+        "tree_prediction": clean_prediction,
+        "agrees_with_final_prediction": agrees,
+        "confidence": clean_json(confidence),
+        "decision_path": path,
+        "omitted_decision_count": omitted_count,
+        "leaf_summary": f"This tree predicts: {clean_prediction}",
+    }
+
+
+def build_random_forest_classifier_explanation(pipeline, trained_content: dict[str, Any], frame: pd.DataFrame, prediction: dict[str, Any]):
+    transformed, preprocessor = dense_transformed_input(pipeline, frame)
+    forest = pipeline.named_steps.get("model")
+    feature_info = transformed_feature_names(preprocessor, trained_content)
+    final_prediction = prediction["value"]
+    final_confidence = prediction.get("confidence")
+    classes = [clean_json(item) for item in getattr(forest, "classes_", [])]
+    final_class_index = next((idx for idx, label in enumerate(classes) if str(label) == str(final_prediction)), None)
+    tree_records = []
+    agreeing = []
+    dissenting = []
+    for index, estimator in enumerate(forest.estimators_[:50]):
+        tree_prediction = clean_json(estimator.predict(transformed)[0])
+        proba = None
+        try:
+            probabilities = estimator.predict_proba(transformed)[0]
+            if final_class_index is not None and final_class_index < len(probabilities):
+                proba = float(probabilities[final_class_index])
+        except Exception:
+            proba = None
+        agrees = str(tree_prediction) == str(final_prediction)
+        record = {"tree_index": index, "tree_prediction": tree_prediction, "agrees_with_final_prediction": agrees, "vote_strength": clean_json(proba), "role": "other"}
+        tree_records.append(record)
+        (agreeing if agrees else dissenting).append((index, estimator, tree_prediction, proba, record))
+    representative = min(agreeing, key=lambda item: abs((item[3] or 0) - (final_confidence or 0)), default=None)
+    confident = max(agreeing, key=lambda item: item[3] if item[3] is not None else -1, default=None)
+    dissenter = max(dissenting, key=lambda item: item[3] if item[3] is not None else -1, default=None)
+    selected = []
+    for role, item in [("representative", representative), ("confident", confident), ("dissenting", dissenter)]:
+        if item and item[0] not in [existing[0] for existing in selected]:
+            item[4]["role"] = role
+            selected.append((item[0], item[1], item[2], item[3], item[4], role))
+    representative_trees = [representative_detail(estimator, transformed, feature_info, index, role, tree_prediction, record["agrees_with_final_prediction"], proba) for index, estimator, tree_prediction, proba, record, role in selected[:3]]
+    agreement_count = len(agreeing)
+    disagreement_count = len(tree_records) - agreement_count
+    tree_count = len(tree_records)
+    vote_summary = f"{agreement_count} of {tree_count} trees predicted {final_prediction}."
+    if disagreement_count:
+        vote_summary += f" {disagreement_count} trees predicted a different class."
+    else:
+        vote_summary += " All trees in this forest agreed with the final prediction."
+    return {
+        "supported": True,
+        "model_type": "RandomForestClassifier",
+        "model_name": trained_content.get("recommended_model_name") or "Random Forest",
+        "headline": f"The forest predicted {final_prediction} for this input.",
+        "plain_english_summary": "A Random Forest is a group of decision trees. Each tree looks at the same input and makes its own prediction. The forest combines these tree predictions to produce the final result.",
+        "caveats": ["This explains this specific prediction only.", "It does not prove that a feature causes the outcome.", "Model confidence is not a guarantee of truth."],
+        "forest_vote": {"tree_count": tree_count, "final_prediction": final_prediction, "agreement_count": agreement_count, "disagreement_count": disagreement_count, "vote_summary": vote_summary, "trees": tree_records},
+        "regression_summary": None,
+        "representative_trees": representative_trees,
+        "features_consulted": features_consulted_for_forest(forest, transformed, feature_info),
+    }
+
+
+def build_random_forest_regressor_explanation(pipeline, trained_content: dict[str, Any], frame: pd.DataFrame, prediction: dict[str, Any]):
+    transformed, preprocessor = dense_transformed_input(pipeline, frame)
+    forest = pipeline.named_steps.get("model")
+    feature_info = transformed_feature_names(preprocessor, trained_content)
+    tree_predictions = [(index, estimator, float(estimator.predict(transformed)[0])) for index, estimator in enumerate(forest.estimators_[:50])]
+    values = np.asarray([item[2] for item in tree_predictions], dtype=float)
+    mean_value = float(np.mean(values)) if len(values) else float(prediction["value"])
+    std_value = float(np.std(values)) if len(values) else 0.0
+    band = std_value if std_value > 0 else max(abs(mean_value) * 0.05, 1.0)
+    within_band = int(np.sum(np.abs(values - mean_value) <= band)) if len(values) else 0
+    representative = min(tree_predictions, key=lambda item: abs(item[2] - mean_value), default=None)
+    high = max(tree_predictions, key=lambda item: item[2], default=None)
+    low = min(tree_predictions, key=lambda item: item[2], default=None)
+    selected = []
+    for role, item in [("representative", representative), ("high_estimate", high), ("low_estimate", low)]:
+        if item and item[0] not in [existing[0] for existing in selected]:
+            selected.append((item[0], item[1], item[2], role))
+    representative_trees = [representative_detail(estimator, transformed, feature_info, index, role, tree_prediction, True, None) for index, estimator, tree_prediction, role in selected[:3]]
+    return {
+        "supported": True,
+        "model_type": "RandomForestRegressor",
+        "model_name": trained_content.get("recommended_model_name") or "Random Forest Regressor",
+        "headline": f"The forest average is {clean_json(mean_value)} for this input.",
+        "plain_english_summary": "A Random Forest Regressor is a group of decision trees. Each tree estimates a numeric value. The forest averages those estimates to produce the final prediction.",
+        "caveats": ["This explains this specific prediction only.", "It does not prove that a feature causes the target value.", "The model combines many features together."],
+        "forest_vote": None,
+        "regression_summary": {"tree_count": len(tree_predictions), "forest_average": clean_json(mean_value), "min_tree_prediction": clean_json(float(np.min(values)) if len(values) else None), "max_tree_prediction": clean_json(float(np.max(values)) if len(values) else None), "tree_prediction_std": clean_json(std_value), "within_reasonable_band_count": within_band, "tree_estimates": [{"tree_index": index, "tree_prediction": clean_json(value)} for index, _, value in tree_predictions]},
+        "representative_trees": representative_trees,
+        "features_consulted": features_consulted_for_forest(forest, transformed, feature_info),
+    }
+
+
+def build_prediction_explanation(task_type: str, pipeline, trained_content: dict[str, Any], frame: pd.DataFrame, prediction: dict[str, Any]):
+    model = getattr(pipeline, "named_steps", {}).get("model")
+    model_name = trained_content.get("recommended_model_name") or model.__class__.__name__ if model is not None else "Model"
+    if isinstance(model, RandomForestClassifier):
+        return build_random_forest_classifier_explanation(pipeline, trained_content, frame, prediction)
+    if isinstance(model, RandomForestRegressor):
+        return build_random_forest_regressor_explanation(pipeline, trained_content, frame, prediction)
+    return {
+        "supported": False,
+        "model_type": model.__class__.__name__ if model is not None else "UnknownModel",
+        "model_name": model_name,
+        "headline": "This model does not yet have an interactive tree explanation.",
+        "plain_english_summary": "This prediction is real, but this model type does not expose Random Forest tree votes or paths in this MVP.",
+        "caveats": ["No tree votes or decision paths are shown because this is not a supported Random Forest model."],
+        "forest_vote": None,
+        "regression_summary": None,
+        "representative_trees": [],
+        "features_consulted": [],
+    }
+
+
 @app.post("/test-prediction-schema")
 def prediction_schema(request: PredictionSchemaRequest, authorization: str | None = Header(default=None)):
     require_config()
@@ -1282,12 +1646,42 @@ def prediction_sample(request: TestPredictionSampleRequest, authorization: str |
     try:
         load_owned_pipe(request.pipe_id, user["id"])
         _, _, trained_content, split_artifact = load_prediction_lineage(request.pipe_id, request.review_results_artifact_id)
-        input_row, actual = sample_validation_input(trained_content, split_artifact)
+        input_row, sample_context = sample_validation_input(trained_content, split_artifact, request.exclude_validation_row_indices)
         return {
             "input": input_row,
-            "source": {"kind": "validation_row", "description": "Real validation row"},
-            "actual": actual,
+            "sample_context": sample_context,
+            "source": {"kind": "validation_row", "description": "Real held-out validation row"},
         }
+    except HTTPException:
+        raise
+    except requests.HTTPError as exc:
+        raise HTTPException(status_code=500, detail=f"Supabase request failed: {exc.response.text[:500]}") from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+
+@app.post("/explain-prediction")
+def explain_prediction(request: ExplainPredictionRequest, authorization: str | None = Header(default=None)):
+    require_config()
+    user = require_user(authorization)
+    try:
+        load_owned_pipe(request.pipe_id, user["id"])
+        _, _, trained_content, split_artifact = load_prediction_lineage(request.pipe_id, request.review_results_artifact_id)
+        task_type = trained_content.get("task_type")
+        target_column = trained_content.get("target_column")
+        if task_type not in {"tabular_classification", "tabular_regression"} or not target_column:
+            raise HTTPException(status_code=400, detail="Unsupported or missing task metadata.")
+        schema = build_prediction_input_schema(trained_content, split_artifact)
+        fields = schema.get("fields") or []
+        if not fields:
+            raise HTTPException(status_code=400, detail="No usable input fields were found for this trained model.")
+        row = coerce_prediction_input(request.input, fields)
+        frame = pd.DataFrame([row], columns=[field["name"] for field in fields])
+        pipeline = decode_recommended_pipeline(trained_content.get("recommended_model_bundle") or {})
+        prediction = prediction_payload_for_pipeline(task_type, pipeline, frame)
+        explanation = build_prediction_explanation(task_type, pipeline, trained_content, frame, prediction)
+        return clean_json({"task_type": task_type, "prediction": prediction, "model_explanation": explanation})
     except HTTPException:
         raise
     except requests.HTTPError as exc:
@@ -1314,21 +1708,15 @@ def test_prediction(request: TestPredictionRequest, authorization: str | None = 
         row = coerce_prediction_input(request.input, fields)
         frame = pd.DataFrame([row], columns=[field["name"] for field in fields])
         pipeline = decode_recommended_pipeline(trained_content.get("recommended_model_bundle") or {})
-        prediction_raw = pipeline.predict(frame)[0]
-        prediction_value = clean_json(prediction_raw)
-        class_probabilities, confidence = (None, None)
-        if task_type == "tabular_classification":
-            class_probabilities, confidence = class_probabilities_for_pipeline(pipeline, frame)
+        prediction = prediction_payload_for_pipeline(task_type, pipeline, frame)
+        prediction_value = prediction["value"]
+        confidence = prediction.get("confidence")
+        class_probabilities = prediction.get("class_probabilities")
         model = {
             "model_id": trained_content.get("recommended_model_id"),
             "model_name": trained_content.get("recommended_model_name"),
         }
-        prediction = {
-            "value": prediction_value,
-            "label": str(prediction_value),
-            "confidence": clean_json(confidence),
-            "class_probabilities": clean_json(class_probabilities),
-        }
+        provenance, ground_truth = build_prediction_provenance_and_ground_truth(task_type, target_column, prediction_value, row, fields, split_artifact, request.sample_context)
         mappable_output = {
             "prediction": prediction_value,
             "confidence": clean_json(confidence),
@@ -1348,6 +1736,8 @@ def test_prediction(request: TestPredictionRequest, authorization: str | None = 
             "input": row,
             "prediction": prediction,
             "plain_english_result": plain_result,
+            "provenance": provenance,
+            "ground_truth": ground_truth,
             "mappable_output": mappable_output,
         })
         artifact_payload = {
@@ -1364,6 +1754,10 @@ def test_prediction(request: TestPredictionRequest, authorization: str | None = 
                 "model_name": model.get("model_name"),
                 "prediction": prediction_value,
                 "confidence": clean_json(confidence),
+                "provenance_kind": provenance.get("kind"),
+                "actual_value": ground_truth.get("actual_value"),
+                "matches_prediction": ground_truth.get("matches_prediction"),
+                "absolute_error": ground_truth.get("absolute_error"),
             },
         }
         artifact = rest_post("artifacts", artifact_payload)[0]
@@ -1375,6 +1769,8 @@ def test_prediction(request: TestPredictionRequest, authorization: str | None = 
             "prediction": prediction_value,
             "confidence": clean_json(confidence),
             "model_name": model.get("model_name"),
+            "provenance": provenance,
+            "ground_truth": ground_truth,
             "storage": {"format": "json", "uri": f"artifact:{artifact['id']}"},
         }
         rest_post(
