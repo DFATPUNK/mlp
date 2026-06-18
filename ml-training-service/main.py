@@ -290,12 +290,14 @@ class PredictionSchemaRequest(BaseModel):
 class TestPredictionSampleRequest(BaseModel):
     pipe_id: str
     review_results_artifact_id: str
+    exclude_validation_row_indices: list[int] | None = None
 
 
 class TestPredictionRequest(BaseModel):
     pipe_id: str
     review_results_artifact_id: str
     input: dict[str, Any]
+    sample_context: dict[str, Any] | None = None
 
 
 @app.get("/health")
@@ -1174,7 +1176,21 @@ def build_prediction_input_schema(trained_content: dict[str, Any], split_artifac
     return {"fields": fields}
 
 
-def sample_validation_input(trained_content: dict[str, Any], split_artifact: dict[str, Any] | None):
+def split_counts_and_ratios(split_artifact: dict[str, Any] | None):
+    split_content = (split_artifact or {}).get("content") or {}
+    splits = split_content.get("splits") or {}
+    train_count = len(splits.get("train") or [])
+    validation_count = len(splits.get("validation") or [])
+    test_count = len(splits.get("test") or [])
+    total = train_count + validation_count + test_count
+    counts = {"training": train_count, "validation": validation_count, "test": test_count, "total": total}
+    ratios = None
+    if total > 0:
+        ratios = {"training": train_count / total, "validation": validation_count / total, "test": test_count / total}
+    return counts, ratios
+
+
+def sample_validation_input(trained_content: dict[str, Any], split_artifact: dict[str, Any] | None, exclude_indices: list[int] | None = None):
     target_column = trained_content.get("target_column")
     split_content = (split_artifact or {}).get("content") or {}
     splits = split_content.get("splits") or {}
@@ -1184,13 +1200,129 @@ def sample_validation_input(trained_content: dict[str, Any], split_artifact: dic
     fields = usable_prediction_columns(trained_content)
     if not fields:
         raise HTTPException(status_code=400, detail="No usable input fields were found for this trained model.")
-    candidate_rows = [row for row in validation_rows if any(field["name"] in row for field in fields)]
-    if not candidate_rows:
+    candidates = [(index, row) for index, row in enumerate(validation_rows) if any(field["name"] in row for field in fields)]
+    if not candidates:
         raise HTTPException(status_code=400, detail="No validation rows contain usable input fields for sample prediction.")
-    sample = random.choice(candidate_rows)
+    excluded = {index for index in (exclude_indices or []) if isinstance(index, int)}
+    available = [(index, row) for index, row in candidates if index not in excluded]
+    sample_index, sample = random.choice(available or candidates)
     input_row = {field["name"]: clean_json(sample.get(field["name"])) for field in fields}
-    actual_value = clean_json(sample.get(target_column)) if target_column else None
-    return input_row, {"target_column": target_column, "value": actual_value}
+    counts, ratios = split_counts_and_ratios(split_artifact)
+    sample_context = {
+        "kind": "validation_row",
+        "validation_row_index": sample_index,
+        "validation_row_number": sample_index + 1,
+        "validation_rows_total": len(validation_rows),
+        "target_is_available_after_prediction": bool(target_column and target_column in sample),
+        "split_counts": counts,
+        "split_ratios": clean_json(ratios),
+    }
+    return input_row, sample_context
+
+
+def normalize_prediction_value(value: Any, field_type: str):
+    if value == "" or value is None or (isinstance(value, float) and np.isnan(value)):
+        return None
+    if field_type == "number":
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+    if field_type == "boolean":
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            lowered = value.strip().lower()
+            if lowered in {"true", "1", "yes", "y", "on"}:
+                return True
+            if lowered in {"false", "0", "no", "n", "off"}:
+                return False
+        return bool(value)
+    return str(value).strip().lower()
+
+
+def prediction_values_match(left: Any, right: Any, field_type: str):
+    normalized_left = normalize_prediction_value(left, field_type)
+    normalized_right = normalize_prediction_value(right, field_type)
+    if normalized_left is None or normalized_right is None:
+        return normalized_left is None and normalized_right is None
+    if field_type == "number":
+        return bool(np.isclose(normalized_left, normalized_right, equal_nan=True))
+    return normalized_left == normalized_right
+
+
+def validation_row_for_context(split_artifact: dict[str, Any] | None, sample_context: dict[str, Any] | None):
+    if not sample_context or sample_context.get("kind") != "validation_row":
+        return None, None
+    index = sample_context.get("validation_row_index")
+    if not isinstance(index, int):
+        return None, None
+    split_content = (split_artifact or {}).get("content") or {}
+    validation_rows = [row for row in ((split_content.get("splits") or {}).get("validation") or []) if isinstance(row, dict)]
+    if index < 0 or index >= len(validation_rows):
+        return None, None
+    return index, validation_rows[index]
+
+
+def build_prediction_provenance_and_ground_truth(
+    task_type: str,
+    target_column: str,
+    prediction_value: Any,
+    row: dict[str, Any],
+    fields: list[dict[str, Any]],
+    split_artifact: dict[str, Any] | None,
+    sample_context: dict[str, Any] | None,
+):
+    counts, ratios = split_counts_and_ratios(split_artifact)
+    validation_index, validation_row = validation_row_for_context(split_artifact, sample_context)
+    validation_rows_total = counts.get("validation") if counts else None
+    matched_validation_row = False
+    if validation_row is not None:
+        matched_validation_row = all(prediction_values_match(row.get(field["name"]), validation_row.get(field["name"]), field["type"]) for field in fields)
+    if matched_validation_row and validation_row is not None and target_column in validation_row:
+        actual_value = clean_json(validation_row.get(target_column))
+        matches_prediction = None
+        absolute_error = None
+        if task_type == "tabular_classification":
+            matches_prediction = prediction_values_match(prediction_value, actual_value, "text")
+        else:
+            predicted_number = normalize_prediction_value(prediction_value, "number")
+            actual_number = normalize_prediction_value(actual_value, "number")
+            if predicted_number is not None and actual_number is not None:
+                absolute_error = abs(predicted_number - actual_number)
+        provenance = {
+            "kind": "validation_row",
+            "validation_row_number": validation_index + 1 if validation_index is not None else None,
+            "validation_rows_total": validation_rows_total,
+            "split_counts": counts,
+            "split_ratios": clean_json(ratios),
+            "message": "This example comes from the validation split and was not used to train the model.",
+        }
+        ground_truth = {
+            "available": True,
+            "target_column": target_column,
+            "actual_value": actual_value,
+            "matches_prediction": matches_prediction,
+            "absolute_error": clean_json(absolute_error),
+        }
+        return provenance, ground_truth
+    message = "You changed the sampled values, so this is now a custom input. There is no known answer to compare against." if sample_context else "This is a custom input. There is no known answer to compare against."
+    provenance = {
+        "kind": "custom_input",
+        "validation_row_number": None,
+        "validation_rows_total": validation_rows_total,
+        "split_counts": counts if counts.get("total") else None,
+        "split_ratios": clean_json(ratios),
+        "message": message,
+    }
+    ground_truth = {
+        "available": False,
+        "target_column": target_column,
+        "actual_value": None,
+        "matches_prediction": None,
+        "absolute_error": None,
+    }
+    return provenance, ground_truth
 
 
 def coerce_prediction_input(raw_input: dict[str, Any], fields: list[dict[str, Any]]):
@@ -1282,11 +1414,11 @@ def prediction_sample(request: TestPredictionSampleRequest, authorization: str |
     try:
         load_owned_pipe(request.pipe_id, user["id"])
         _, _, trained_content, split_artifact = load_prediction_lineage(request.pipe_id, request.review_results_artifact_id)
-        input_row, actual = sample_validation_input(trained_content, split_artifact)
+        input_row, sample_context = sample_validation_input(trained_content, split_artifact, request.exclude_validation_row_indices)
         return {
             "input": input_row,
-            "source": {"kind": "validation_row", "description": "Real validation row"},
-            "actual": actual,
+            "sample_context": sample_context,
+            "source": {"kind": "validation_row", "description": "Real held-out validation row"},
         }
     except HTTPException:
         raise
@@ -1329,6 +1461,7 @@ def test_prediction(request: TestPredictionRequest, authorization: str | None = 
             "confidence": clean_json(confidence),
             "class_probabilities": clean_json(class_probabilities),
         }
+        provenance, ground_truth = build_prediction_provenance_and_ground_truth(task_type, target_column, prediction_value, row, fields, split_artifact, request.sample_context)
         mappable_output = {
             "prediction": prediction_value,
             "confidence": clean_json(confidence),
@@ -1348,6 +1481,8 @@ def test_prediction(request: TestPredictionRequest, authorization: str | None = 
             "input": row,
             "prediction": prediction,
             "plain_english_result": plain_result,
+            "provenance": provenance,
+            "ground_truth": ground_truth,
             "mappable_output": mappable_output,
         })
         artifact_payload = {
@@ -1364,6 +1499,10 @@ def test_prediction(request: TestPredictionRequest, authorization: str | None = 
                 "model_name": model.get("model_name"),
                 "prediction": prediction_value,
                 "confidence": clean_json(confidence),
+                "provenance_kind": provenance.get("kind"),
+                "actual_value": ground_truth.get("actual_value"),
+                "matches_prediction": ground_truth.get("matches_prediction"),
+                "absolute_error": ground_truth.get("absolute_error"),
             },
         }
         artifact = rest_post("artifacts", artifact_payload)[0]
@@ -1375,6 +1514,8 @@ def test_prediction(request: TestPredictionRequest, authorization: str | None = 
             "prediction": prediction_value,
             "confidence": clean_json(confidence),
             "model_name": model.get("model_name"),
+            "provenance": provenance,
+            "ground_truth": ground_truth,
             "storage": {"format": "json", "uri": f"artifact:{artifact['id']}"},
         }
         rest_post(
