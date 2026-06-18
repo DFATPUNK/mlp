@@ -1,6 +1,7 @@
 import base64
 import io
 import os
+import random
 import time
 from typing import Any
 
@@ -282,6 +283,11 @@ class ReviewResultsRequest(BaseModel):
 
 
 class PredictionSchemaRequest(BaseModel):
+    pipe_id: str
+    review_results_artifact_id: str
+
+
+class TestPredictionSampleRequest(BaseModel):
     pipe_id: str
     review_results_artifact_id: str
 
@@ -1168,6 +1174,25 @@ def build_prediction_input_schema(trained_content: dict[str, Any], split_artifac
     return {"fields": fields}
 
 
+def sample_validation_input(trained_content: dict[str, Any], split_artifact: dict[str, Any] | None):
+    target_column = trained_content.get("target_column")
+    split_content = (split_artifact or {}).get("content") or {}
+    splits = split_content.get("splits") or {}
+    validation_rows = [row for row in (splits.get("validation") or []) if isinstance(row, dict)]
+    if not validation_rows:
+        raise HTTPException(status_code=400, detail="No validation rows are available for sample prediction.")
+    fields = usable_prediction_columns(trained_content)
+    if not fields:
+        raise HTTPException(status_code=400, detail="No usable input fields were found for this trained model.")
+    candidate_rows = [row for row in validation_rows if any(field["name"] in row for field in fields)]
+    if not candidate_rows:
+        raise HTTPException(status_code=400, detail="No validation rows contain usable input fields for sample prediction.")
+    sample = random.choice(candidate_rows)
+    input_row = {field["name"]: clean_json(sample.get(field["name"])) for field in fields}
+    actual_value = clean_json(sample.get(target_column)) if target_column else None
+    return input_row, {"target_column": target_column, "value": actual_value}
+
+
 def coerce_prediction_input(raw_input: dict[str, Any], fields: list[dict[str, Any]]):
     if not isinstance(raw_input, dict):
         raise HTTPException(status_code=400, detail="Prediction input must be a JSON object.")
@@ -1241,6 +1266,27 @@ def prediction_schema(request: PredictionSchemaRequest, authorization: str | Non
                 "model_name": trained_content.get("recommended_model_name"),
             },
             "input_schema": schema,
+        }
+    except HTTPException:
+        raise
+    except requests.HTTPError as exc:
+        raise HTTPException(status_code=500, detail=f"Supabase request failed: {exc.response.text[:500]}") from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.post("/test-prediction-sample")
+def prediction_sample(request: TestPredictionSampleRequest, authorization: str | None = Header(default=None)):
+    require_config()
+    user = require_user(authorization)
+    try:
+        load_owned_pipe(request.pipe_id, user["id"])
+        _, _, trained_content, split_artifact = load_prediction_lineage(request.pipe_id, request.review_results_artifact_id)
+        input_row, actual = sample_validation_input(trained_content, split_artifact)
+        return {
+            "input": input_row,
+            "source": {"kind": "validation_row", "description": "Real validation row"},
+            "actual": actual,
         }
     except HTTPException:
         raise
