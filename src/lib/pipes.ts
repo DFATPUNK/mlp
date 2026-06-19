@@ -111,6 +111,8 @@ export type ReviewResultsStepOutput = {
   recommended_model_name: string;
   primary_metric_name: string;
   primary_metric_value: number;
+  review_acknowledged?: boolean;
+  review_acknowledged_at?: string;
   storage: { format: "json"; uri: string };
 };
 
@@ -234,8 +236,14 @@ function buildPipeCardMetadata(pipe: Pipe, outputs: StepOutputRow[]): PipeCardMe
   const trainOutput = byStep.get("train_models") ?? {};
   const reviewOutput = byStep.get("review_results") ?? {};
   const testOutput = byStep.get("test_prediction") ?? {};
-  const completedStepCount = BUILDER_STEPS.filter((step) => byStep.has(step.key)).length;
-  const firstIncomplete = BUILDER_STEPS.find((step) => !byStep.has(step.key));
+  const isStepComplete = (stepKey: BuilderStepKey) => {
+    if (!byStep.has(stepKey)) return false;
+    if (stepKey !== "review_results") return true;
+    const reviewAcknowledged = byStep.get("review_results")?.review_acknowledged;
+    return reviewAcknowledged === undefined || reviewAcknowledged === true;
+  };
+  const completedStepCount = BUILDER_STEPS.filter((step) => isStepComplete(step.key)).length;
+  const firstIncomplete = BUILDER_STEPS.find((step) => !isStepComplete(step.key));
   const baseMetadata = {
     completedStepCount,
     totalStepCount: 8 as const,
@@ -375,6 +383,31 @@ export async function getTrainModelsStepOutput(pipeId: string): Promise<TrainMod
 
 export async function getReviewResultsStepOutput(pipeId: string): Promise<ReviewResultsStepOutput | null> {
   return getStepOutput<ReviewResultsStepOutput>(pipeId, "review_results");
+}
+
+export function isReviewResultsAcknowledged(output: ReviewResultsStepOutput | null): boolean {
+  if (!output) return false;
+  return output.review_acknowledged === undefined || output.review_acknowledged === true;
+}
+
+export async function acknowledgeReviewResults(pipeId: string): Promise<ReviewResultsStepOutput> {
+  const current = await getReviewResultsStepOutput(pipeId);
+  if (!current) throw new Error("Review results have not been generated yet.");
+  const acknowledgedOutput: ReviewResultsStepOutput = {
+    ...current,
+    review_acknowledged: true,
+    review_acknowledged_at: new Date().toISOString(),
+  };
+  const { data, error } = await supabase
+    .from("pipe_step_outputs")
+    .update({ output: acknowledgedOutput })
+    .eq("pipe_id", pipeId)
+    .eq("step_key", "review_results")
+    .select("output")
+    .single();
+
+  if (error) throw error;
+  return (data.output ?? acknowledgedOutput) as ReviewResultsStepOutput;
 }
 
 export async function getTestPredictionStepOutput(pipeId: string): Promise<TestPredictionStepOutput | null> {

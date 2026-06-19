@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { getArtifactById, type ReviewResultsStepOutput, type TrainModelsStepOutput } from "../../lib/pipes";
+import { acknowledgeReviewResults, getArtifactById, isReviewResultsAcknowledged, type ReviewResultsStepOutput, type TrainModelsStepOutput } from "../../lib/pipes";
 import { supabase } from "../../lib/supabaseClient";
 
 type ReviewResultsStepProps = {
@@ -7,6 +7,7 @@ type ReviewResultsStepProps = {
   trainModelsOutput: TrainModelsStepOutput | null;
   initialReviewResultsOutput: ReviewResultsStepOutput | null;
   onCompleted: (output: ReviewResultsStepOutput) => void;
+  onAcknowledged: (output: ReviewResultsStepOutput) => void;
   onBackToTrainModels: () => void;
 };
 
@@ -81,14 +82,16 @@ function isReviewContent(value: unknown): value is ReviewContent {
   return !!value && typeof value === "object" && "recommended_model" in value && "charts" in value;
 }
 
-export function ReviewResultsStep({ pipeId, trainModelsOutput, initialReviewResultsOutput, onCompleted, onBackToTrainModels }: ReviewResultsStepProps) {
+export function ReviewResultsStep({ pipeId, trainModelsOutput, initialReviewResultsOutput, onCompleted, onAcknowledged, onBackToTrainModels }: ReviewResultsStepProps) {
   const [reviewOutput, setReviewOutput] = useState<ReviewResultsStepOutput | null>(initialReviewResultsOutput);
   const [content, setContent] = useState<ReviewContent | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [selectedChartKey, setSelectedChartKey] = useState<string | null>(null);
+  const [acknowledging, setAcknowledging] = useState(false);
   const startedRef = useRef(false);
   const output = reviewOutput ?? initialReviewResultsOutput;
+  const acknowledged = isReviewResultsAcknowledged(output);
 
   useEffect(() => {
     if (!initialReviewResultsOutput || content) return;
@@ -161,6 +164,7 @@ export function ReviewResultsStep({ pipeId, trainModelsOutput, initialReviewResu
         recommended_model_name: payload.recommended_model.model_name,
         primary_metric_name: payload.recommended_model.primary_metric_name,
         primary_metric_value: payload.recommended_model.primary_metric_value,
+        review_acknowledged: false,
         storage: { format: "json", uri: `artifact:${payload.review_results_artifact_id}` },
       };
       setContent(payload);
@@ -170,6 +174,20 @@ export function ReviewResultsStep({ pipeId, trainModelsOutput, initialReviewResu
       setError(caught instanceof Error ? caught.message : "Unable to generate review results.");
     } finally {
       setLoading(false);
+    }
+  }
+
+  async function handleAcknowledgeReview() {
+    setAcknowledging(true);
+    setError(null);
+    try {
+      const nextOutput = await acknowledgeReviewResults(pipeId);
+      setReviewOutput(nextOutput);
+      onAcknowledged(nextOutput);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Unable to continue with the recommended model.");
+    } finally {
+      setAcknowledging(false);
     }
   }
 
@@ -187,7 +205,7 @@ export function ReviewResultsStep({ pipeId, trainModelsOutput, initialReviewResu
 
   const warnings = [...(content.recommended_model.warnings ?? []), ...(content.validation_summary.notes ?? [])];
   return <div>
-    <section className="mt-6 rounded-3xl border border-emerald-200 bg-emerald-50 p-6"><h2 className="text-lg font-semibold text-emerald-900">Review generated.</h2><p className="mt-2 text-sm text-emerald-800">MLP reviewed the real validation results from the trained models artifact.</p><dl className="mt-4 grid gap-2 text-sm text-emerald-900 md:grid-cols-2"><div><dt className="font-medium">Recommended model</dt><dd>{content.recommended_model.model_name}</dd></div><div><dt className="font-medium">Primary metric</dt><dd>{metricLabel(content.recommended_model.primary_metric_name)}: {formatMetric(content.recommended_model.primary_metric_value)}</dd></div><div><dt className="font-medium">Rows reviewed</dt><dd>{content.validation_summary.rows_evaluated}</dd></div>{output ? <div><dt className="font-medium">Review results artifact ID</dt><dd className="font-mono text-xs">{output.review_results_artifact_id}</dd></div> : null}</dl></section>
+    <section className="mt-6 rounded-3xl border border-emerald-200 bg-emerald-50 p-6"><h2 className="text-lg font-semibold text-emerald-900">Review generated.</h2><p className="mt-2 text-sm text-emerald-800">MLP reviewed the real validation results from the trained models artifact. Read this review before continuing.</p><dl className="mt-4 grid gap-2 text-sm text-emerald-900 md:grid-cols-2"><div><dt className="font-medium">Recommended model</dt><dd>{content.recommended_model.model_name}</dd></div><div><dt className="font-medium">Primary metric</dt><dd>{metricLabel(content.recommended_model.primary_metric_name)}: {formatMetric(content.recommended_model.primary_metric_value)}</dd></div><div><dt className="font-medium">Rows reviewed</dt><dd>{content.validation_summary.rows_evaluated}</dd></div><div><dt className="font-medium">Review status</dt><dd>{acknowledged ? "Acknowledged" : "Waiting for your acknowledgement"}</dd></div></dl></section>
 
     <section className="mt-6 rounded-3xl border border-black/10 bg-white/60 p-6"><h2 className="text-lg font-semibold">Recommended model</h2><p className="mt-3 text-sm text-black/70">{content.plain_english_summary}</p><p className="mt-3 text-sm text-black/60"><span className="font-medium text-black">Why this model?</span> {content.recommended_model.explanation}</p></section>
 
@@ -201,6 +219,6 @@ export function ReviewResultsStep({ pipeId, trainModelsOutput, initialReviewResu
 
     {warnings.length ? <section className="mt-6 rounded-3xl border border-amber-200 bg-amber-50 p-6"><h2 className="text-lg font-semibold text-amber-900">Warnings and notes</h2><ul className="mt-3 list-disc space-y-1 pl-5 text-sm text-amber-900">{warnings.map((warning) => <li key={warning}>{warning}</li>)}</ul></section> : null}
 
-    <section className="mt-6 rounded-3xl border border-black/10 bg-white/60 p-6"><button type="button" className="rounded-full bg-black px-4 py-2 text-sm font-medium text-white">Continue to Test prediction</button></section>
+    <section className="mt-6 rounded-3xl border border-black/10 bg-white/60 p-6"><p className="text-sm text-black/65">This pipe will continue with the recommended model: <span className="font-medium text-black">{content.recommended_model.model_name}</span>.</p>{error ? <p className="mt-4 rounded-2xl bg-red-500/10 px-4 py-3 text-sm text-red-700">{error}</p> : null}<button type="button" onClick={handleAcknowledgeReview} disabled={acknowledging} className="mt-4 rounded-full bg-black px-4 py-2 text-sm font-medium text-white disabled:bg-black/30">{acknowledging ? "Continuing…" : "Use recommended model and continue"}</button></section>
   </div>;
 }
