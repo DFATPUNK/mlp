@@ -84,7 +84,7 @@ export function PipeCard({ pipe, metadata, onDelete, onRename, deleting = false 
               {pipe.type.replaceAll("_", " ")}
             </span>
             <span className="rounded-full border border-emerald-500/20 bg-emerald-500/10 px-3 py-1 text-xs font-medium text-emerald-700">
-              {pipe.status}
+              {metadata.publicationStatus === "live" ? "Live" : pipe.status}
             </span>
           </div>
 
@@ -153,6 +153,7 @@ export function PipeCard({ pipe, metadata, onDelete, onRename, deleting = false 
         {metadata.recommendedModelName ? (
           <p className="mt-1 text-xs text-black/50">
             {metricLabel(metadata.primaryMetricName)}: {formatMetric(metadata.primaryMetricValue)}
+            {metadata.publicationStatus === "live" && metadata.deployedVersion ? ` · Deployed v${metadata.deployedVersion}` : ""}
           </p>
         ) : null}
       </div>

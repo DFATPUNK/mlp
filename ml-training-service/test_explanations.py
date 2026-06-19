@@ -49,3 +49,18 @@ class PredictionExplanationTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+class PublicationSecurityTests(unittest.TestCase):
+    def test_api_key_hashing_and_rotation_semantics(self):
+        if MISSING_DEPENDENCY is not None:
+            self.skipTest("ML training dependencies are not installed")
+        first_key = main.generate_api_key()
+        second_key = main.generate_api_key()
+        self.assertTrue(first_key.startswith("mlp_live_"))
+        first_hash = main.hash_api_key(first_key)
+        self.assertNotEqual(first_hash, first_key)
+        self.assertTrue(main.verify_api_key(first_key, first_hash))
+        self.assertFalse(main.verify_api_key("wrong", first_hash))
+        second_hash = main.hash_api_key(second_key)
+        self.assertFalse(main.verify_api_key(first_key, second_hash))
+        self.assertTrue(main.verify_api_key(second_key, second_hash))

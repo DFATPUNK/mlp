@@ -1,7 +1,10 @@
 import base64
+import hashlib
+import hmac
 import io
 import os
 import random
+import secrets
 import time
 from typing import Any
 
@@ -30,6 +33,7 @@ import matplotlib.pyplot as plt
 
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "").rstrip("/")
 SERVICE_ROLE_KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "")
+PUBLIC_BASE_URL = os.environ.get("PUBLIC_BASE_URL", os.environ.get("ML_TRAINING_SERVICE_URL", "")).rstrip("/")
 
 
 def supabase_headers(extra=None):
@@ -52,6 +56,13 @@ def rest_get(path, params=None):
 def rest_post(path, payload, params=None, prefer="return=representation"):
     headers = supabase_headers({"Prefer": prefer})
     res = requests.post(f"{SUPABASE_URL}/rest/v1/{path}", headers=headers, params=params, json=payload, timeout=30)
+    res.raise_for_status()
+    return res.json()
+
+
+def rest_patch(path, payload, params=None, prefer="return=representation"):
+    headers = supabase_headers({"Prefer": prefer})
+    res = requests.patch(f"{SUPABASE_URL}/rest/v1/{path}", headers=headers, params=params, json=payload, timeout=30)
     res.raise_for_status()
     return res.json()
 
@@ -311,6 +322,20 @@ class ExplainPredictionTreeRequest(BaseModel):
     review_results_artifact_id: str
     input: dict[str, Any]
     tree_index: int
+
+
+class PublishPipeRequest(BaseModel):
+    pipe_id: str
+    review_results_artifact_id: str
+    test_prediction_artifact_id: str
+
+
+class PipeIdRequest(BaseModel):
+    pipe_id: str
+
+
+class PublicPredictRequest(BaseModel):
+    input: dict[str, Any]
 
 
 @app.get("/health")
@@ -1121,6 +1146,123 @@ def load_prediction_lineage(pipe_id: str, review_results_artifact_id: str):
     return review_artifact, trained_artifact_id, trained_content, split_artifact
 
 
+def now_iso():
+    return pd.Timestamp.utcnow().isoformat()
+
+
+def service_base_url():
+    return PUBLIC_BASE_URL or "https://YOUR_SERVICE_URL"
+
+
+def endpoint_url(public_id: str):
+    return f"{service_base_url()}/v1/pipes/{public_id}/predict"
+
+
+def generate_api_key():
+    return f"mlp_live_{secrets.token_urlsafe(32)}"
+
+
+def hash_api_key(api_key: str):
+    return hashlib.sha256(api_key.encode("utf-8")).hexdigest()
+
+
+def api_key_prefix(api_key: str):
+    return api_key[:18] + "..."
+
+
+def verify_api_key(raw_key: str | None, stored_hash: str | None):
+    if not raw_key or not stored_hash:
+        return False
+    return hmac.compare_digest(hash_api_key(raw_key), stored_hash)
+
+
+def get_step_output_row(pipe_id: str, step_key: str):
+    return get_single("pipe_step_outputs", {"pipe_id": f"eq.{pipe_id}", "step_key": f"eq.{step_key}", "select": "artifact_id,status,output"})
+
+
+def require_review_acknowledged(pipe_id: str):
+    row = get_step_output_row(pipe_id, "review_results")
+    output = (row or {}).get("output") or {}
+    if not row or row.get("status") != "completed":
+        raise HTTPException(status_code=400, detail="Review results must be generated before publishing.")
+    # Older review rows did not have this flag; treat missing as acknowledged for compatibility.
+    if output.get("review_acknowledged") is False:
+        raise HTTPException(status_code=400, detail="Review results must be acknowledged before publishing.")
+    return output
+
+
+def public_output_schema(task_type: str, target_column: str):
+    return {
+        "prediction": {
+            "target_column": target_column,
+            "value": "string | number | boolean",
+            "label": f"Predicted {target_column}",
+            "confidence": "number | null" if task_type == "tabular_classification" else None,
+            "class_probabilities": "object | null" if task_type == "tabular_classification" else None,
+        },
+        "model": {"name": "string", "version": "number"},
+    }
+
+
+def public_prediction_response(prediction: dict[str, Any], deployment: dict[str, Any]):
+    snapshot = deployment.get("model_snapshot") or {}
+    target_column = snapshot.get("target_column")
+    return clean_json({
+        "prediction": {
+            "target_column": target_column,
+            "value": prediction.get("value"),
+            "label": f"Predicted {target_column}",
+            "confidence": prediction.get("confidence"),
+            "class_probabilities": prediction.get("class_probabilities"),
+        },
+        "model": {"name": snapshot.get("model_name"), "version": deployment.get("version")},
+    })
+
+
+def load_publication(pipe_id: str):
+    return get_single("pipe_publications", {"pipe_id": f"eq.{pipe_id}", "select": "*"})
+
+
+def load_publication_by_public_id(public_id: str):
+    return get_single("pipe_publications", {"public_id": f"eq.{public_id}", "select": "*"})
+
+
+def load_active_deployment(publication: dict[str, Any]):
+    deployment_id = publication.get("active_deployment_id")
+    if not deployment_id:
+        return None
+    return get_single("pipe_deployments", {"id": f"eq.{deployment_id}", "select": "*"})
+
+
+def publication_status_payload(publication: dict[str, Any] | None, deployment: dict[str, Any] | None = None):
+    if not publication:
+        return {"status": "draft", "publication": None}
+    status = "live" if publication.get("is_live") else "unpublished"
+    return clean_json({
+        "status": status,
+        "publication": {
+            "status": status,
+            "public_id": publication.get("public_id"),
+            "version": publication.get("active_version"),
+            "endpoint_url": endpoint_url(publication.get("public_id")),
+            "api_key_prefix": publication.get("api_key_prefix"),
+            "published_at": publication.get("published_at"),
+            "unpublished_at": publication.get("unpublished_at"),
+            "last_key_rotated_at": publication.get("last_key_rotated_at"),
+            "model_snapshot": (deployment or {}).get("model_snapshot"),
+            "active_deployment_id": publication.get("active_deployment_id"),
+        },
+    })
+
+
+def extract_api_key(authorization: str | None, x_mlp_api_key: str | None):
+    if x_mlp_api_key:
+        return x_mlp_api_key.strip()
+    if authorization and authorization.startswith("Bearer "):
+        return authorization.replace("Bearer ", "", 1).strip()
+    return None
+
+
 def usable_prediction_columns(trained_content: dict[str, Any]):
     preprocessing = trained_content.get("preprocessing") or {}
     numeric = [col for col in preprocessing.get("numeric_columns") or [] if isinstance(col, str)]
@@ -1407,19 +1549,42 @@ def transformed_feature_names(preprocessor, trained_content: dict[str, Any]):
         raw_names = []
     if not raw_names:
         return []
-    original_columns = []
     preprocessing = trained_content.get("preprocessing") or {}
-    for key in ["numeric_columns", "categorical_columns", "boolean_columns"]:
-        original_columns.extend([col for col in preprocessing.get(key) or [] if isinstance(col, str)])
+    numeric_columns = [col for col in preprocessing.get("numeric_columns") or [] if isinstance(col, str)]
+    categorical_columns = [col for col in preprocessing.get("categorical_columns") or [] if isinstance(col, str)]
+    boolean_columns = [col for col in preprocessing.get("boolean_columns") or [] if isinstance(col, str)]
+    cat_bool_columns = categorical_columns + boolean_columns
+    numeric_scalers = {}
+    categorical_features = {}
+    try:
+        numeric_pipe = preprocessor.named_transformers_.get("numeric")
+        scaler = numeric_pipe.named_steps.get("scaler") if hasattr(numeric_pipe, "named_steps") else None
+        if scaler is not None:
+            for idx, column in enumerate(numeric_columns):
+                numeric_scalers[column] = {"mean": float(scaler.mean_[idx]), "scale": float(scaler.scale_[idx])}
+    except Exception:
+        numeric_scalers = {}
+    try:
+        categorical_pipe = preprocessor.named_transformers_.get("categorical")
+        encoder = categorical_pipe.named_steps.get("encoder") if hasattr(categorical_pipe, "named_steps") else None
+        if encoder is not None:
+            for raw_feature in encoder.get_feature_names_out(cat_bool_columns):
+                raw_feature = str(raw_feature)
+                original = next((col for col in cat_bool_columns if raw_feature == col or raw_feature.startswith(f"{col}_")), None)
+                if original:
+                    categorical_features[raw_feature] = {"original": original, "category": raw_feature[len(original) + 1:] if raw_feature.startswith(f"{original}_") else None, "kind": "boolean" if original in boolean_columns else "categorical"}
+    except Exception:
+        categorical_features = {}
     mapped = []
     for raw_name in raw_names:
         stripped = raw_name.split("__", 1)[1] if "__" in raw_name else raw_name
-        original_match = next((col for col in original_columns if stripped == col or stripped.startswith(f"{col}_") or stripped.startswith(f"{col}=")), None)
-        mapped.append({
-            "raw": raw_name,
-            "display": display_feature_name(original_match or stripped),
-            "original": original_match,
-        })
+        info = {"raw": raw_name, "display": display_feature_name(stripped), "original": None, "kind": "technical"}
+        if stripped in numeric_columns:
+            info.update({"display": display_feature_name(stripped), "original": stripped, "kind": "numeric", **numeric_scalers.get(stripped, {})})
+        elif stripped in categorical_features:
+            cat_info = categorical_features[stripped]
+            info.update({"display": display_feature_name(cat_info["original"]), "original": cat_info["original"], "kind": cat_info["kind"], "category": cat_info.get("category")})
+        mapped.append(info)
     return mapped
 
 
@@ -1447,35 +1612,49 @@ def prediction_payload_for_pipeline(task_type: str, pipeline, frame: pd.DataFram
     }
 
 
-def tree_decision_path(estimator, transformed_input, feature_info: list[dict[str, Any]], tree_prediction: Any, max_visible: int = 8):
+def tree_decision_path(estimator, transformed_input, feature_info: list[dict[str, Any]], tree_prediction: Any, original_row: dict[str, Any] | None = None, max_visible: int = 8):
     tree = estimator.tree_
     node_indicator = estimator.decision_path(transformed_input)
     leaf_id = estimator.apply(transformed_input)[0]
     node_ids = node_indicator.indices[node_indicator.indptr[0]:node_indicator.indptr[1]]
     split_nodes = [node_id for node_id in node_ids if node_id != leaf_id and tree.feature[node_id] >= 0]
     visible_nodes = split_nodes
-    omitted_count = 0
-    if len(split_nodes) > max_visible:
-        visible_nodes = split_nodes[: max_visible - 1] + [split_nodes[-1]]
-        omitted_count = len(split_nodes) - len(visible_nodes)
+    visible_count = min(len(split_nodes), max_visible)
+    hidden_count = max(len(split_nodes) - visible_count, 0)
     steps = []
+    original_row = original_row or {}
     for step_number, node_id in enumerate(visible_nodes, start=1):
         feature_index = int(tree.feature[node_id])
         threshold = float(tree.threshold[node_id])
-        input_value = clean_json(transformed_input[0, feature_index])
-        outcome = bool(transformed_input[0, feature_index] <= threshold)
+        transformed_value = float(transformed_input[0, feature_index])
+        outcome = bool(transformed_value <= threshold)
         operator = "<=" if outcome else ">"
-        feature_name = feature_info[feature_index]["display"] if feature_index < len(feature_info) else f"Technical feature {feature_index}"
+        info = feature_info[feature_index] if feature_index < len(feature_info) else {"display": f"Technical feature {feature_index}", "kind": "technical", "raw": f"feature_{feature_index}"}
+        feature_name = info.get("display") or f"Technical feature {feature_index}"
+        user_value = original_row.get(info.get("original")) if info.get("original") else clean_json(transformed_value)
+        display_threshold = threshold
+        if info.get("kind") == "numeric" and "mean" in info and "scale" in info:
+            display_threshold = threshold * float(info["scale"]) + float(info["mean"])
+            display_text = f"{feature_name} {operator} {display_threshold:.3g}? {'Yes' if outcome else 'No'}"
+        elif info.get("kind") in {"categorical", "boolean"} and info.get("category") is not None:
+            category = str(info.get("category"))
+            is_present = transformed_value > threshold
+            display_text = f"Is {feature_name} '{category}'? {'Yes' if is_present else 'No'}"
+            display_threshold = category
+        else:
+            display_text = f"Technical model feature: {info.get('raw', feature_name)} {operator} {threshold:.3g}? {'Yes' if outcome else 'No'}"
         steps.append({
             "step": step_number,
             "feature": feature_name,
             "operator": operator,
-            "threshold": clean_json(threshold),
-            "input_value": input_value,
+            "threshold": clean_json(display_threshold),
+            "input_value": clean_json(user_value),
+            "transformed_input_value": clean_json(transformed_value),
             "outcome": outcome,
-            "display_text": f"{feature_name} {operator} {threshold:.3g} → {'yes' if outcome else 'no'}",
+            "display_text": display_text,
         })
-    return steps, omitted_count, clean_json(tree_prediction)
+    metadata = {"total_decision_count": len(split_nodes), "visible_decision_count": visible_count, "hidden_decision_count": hidden_count}
+    return steps, metadata, clean_json(tree_prediction)
 
 
 def features_consulted_for_forest(forest, transformed_input, feature_info: list[dict[str, Any]]):
@@ -1529,8 +1708,8 @@ def tree_class_prediction_record(estimator, transformed_input, forest_classes, f
     return tree_prediction, agrees, float(probabilities[top_index])
 
 
-def representative_detail(estimator, transformed_input, feature_info, tree_index: int, role: str, prediction: Any, agrees: bool, confidence: float | None):
-    path, hidden_count, clean_prediction = tree_decision_path(estimator, transformed_input, feature_info, prediction)
+def representative_detail(estimator, transformed_input, feature_info, tree_index: int, role: str, prediction: Any, agrees: bool, confidence: float | None, original_row: dict[str, Any] | None = None):
+    path, path_metadata, clean_prediction = tree_decision_path(estimator, transformed_input, feature_info, prediction, original_row)
     return {
         "tree_index": tree_index,
         "role": role,
@@ -1538,8 +1717,7 @@ def representative_detail(estimator, transformed_input, feature_info, tree_index
         "agrees_with_final_prediction": agrees,
         "confidence": clean_json(confidence),
         "decision_path": path,
-        "hidden_step_count": hidden_count,
-        "omitted_decision_count": hidden_count,
+        **path_metadata,
         "leaf_summary": f"This tree predicts: {clean_prediction}",
     }
 
@@ -1785,8 +1963,8 @@ def build_tree_detail(task_type: str, pipeline, trained_content: dict[str, Any],
         agrees = True
         confidence = None
         role = "tree_estimate"
-    detail = representative_detail(estimator, transformed, feature_info, tree_index, role, tree_prediction, agrees, confidence)
-    return {**detail, "hidden_step_count": detail.get("hidden_step_count", 0)}
+    detail = representative_detail(estimator, transformed, feature_info, tree_index, role, tree_prediction, agrees, confidence, frame.iloc[0].to_dict())
+    return detail
 
 
 @app.post("/test-prediction-schema")
@@ -1866,6 +2044,184 @@ def explain_prediction_tree(request: ExplainPredictionTreeRequest, authorization
         raise HTTPException(status_code=500, detail=f"Supabase request failed: {exc.response.text[:500]}") from exc
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.post("/publish-pipe")
+def publish_pipe(request: PublishPipeRequest, authorization: str | None = Header(default=None)):
+    require_config()
+    user = require_user(authorization)
+    try:
+        load_owned_pipe(request.pipe_id, user["id"])
+        review_output = require_review_acknowledged(request.pipe_id)
+        if review_output.get("review_results_artifact_id") != request.review_results_artifact_id:
+            raise HTTPException(status_code=400, detail="Review results artifact does not match the acknowledged review.")
+        review_artifact, trained_artifact_id, trained_content, split_artifact = load_prediction_lineage(request.pipe_id, request.review_results_artifact_id)
+        test_artifact = load_artifact(request.pipe_id, request.test_prediction_artifact_id)
+        test_content = test_artifact.get("content") or {}
+        if test_content.get("previous_review_results_artifact_id") != request.review_results_artifact_id:
+            raise HTTPException(status_code=400, detail="Test prediction must belong to this reviewed model.")
+        schema = build_prediction_input_schema(trained_content, split_artifact)
+        task_type = trained_content.get("task_type")
+        target_column = trained_content.get("target_column")
+        model_snapshot = {
+            "model_id": trained_content.get("recommended_model_id"),
+            "model_name": trained_content.get("recommended_model_name"),
+            "task_type": task_type,
+            "target_column": target_column,
+            "primary_metric_name": review_output.get("primary_metric_name"),
+            "primary_metric_value": review_output.get("primary_metric_value"),
+            "trained_models_artifact_id": trained_artifact_id,
+            "review_results_artifact_id": request.review_results_artifact_id,
+        }
+        publication = load_publication(request.pipe_id)
+        new_key = None
+        if publication:
+            public_id = publication["public_id"]
+            key_hash = publication["api_key_hash"]
+            key_prefix = publication["api_key_prefix"]
+            next_version = int(publication.get("active_version") or 0) + 1
+        else:
+            new_key = generate_api_key()
+            public_id = None
+            key_hash = hash_api_key(new_key)
+            key_prefix = api_key_prefix(new_key)
+            next_version = 1
+            publication = rest_post("pipe_publications", {"pipe_id": request.pipe_id, "api_key_hash": key_hash, "api_key_prefix": key_prefix})[0]
+            public_id = publication["public_id"]
+        if public_id is None:
+            public_id = publication["public_id"]
+        active_deployment_id = publication.get("active_deployment_id")
+        if active_deployment_id:
+            rest_patch("pipe_deployments", {"status": "superseded"}, params={"id": f"eq.{active_deployment_id}"})
+        deployment = rest_post("pipe_deployments", {
+            "pipe_id": request.pipe_id,
+            "version": next_version,
+            "status": "active",
+            "trained_models_artifact_id": trained_artifact_id,
+            "review_results_artifact_id": request.review_results_artifact_id,
+            "test_prediction_artifact_id": request.test_prediction_artifact_id,
+            "input_schema": schema,
+            "output_schema": public_output_schema(task_type, target_column),
+            "model_snapshot": model_snapshot,
+        })[0]
+        published_at = deployment.get("published_at") or now_iso()
+        publication = rest_patch("pipe_publications", {
+            "api_key_hash": key_hash,
+            "api_key_prefix": key_prefix,
+            "active_version": next_version,
+            "is_live": True,
+            "active_deployment_id": deployment["id"],
+            "published_at": published_at,
+            "unpublished_at": None,
+        }, params={"pipe_id": f"eq.{request.pipe_id}"})[0]
+        output = {
+            "step_key": "publish_pipe",
+            "status": "completed",
+            "publication_status": "live",
+            "public_id": publication["public_id"],
+            "active_version": next_version,
+            "active_deployment_id": deployment["id"],
+            "endpoint_url": endpoint_url(publication["public_id"]),
+            "api_key_prefix": key_prefix,
+            "published_at": published_at,
+        }
+        rest_post("pipe_step_outputs", {"pipe_id": request.pipe_id, "step_key": "publish_pipe", "artifact_id": request.test_prediction_artifact_id, "status": "completed", "output": output}, params={"on_conflict": "pipe_id,step_key"}, prefer="resolution=merge-duplicates,return=representation")
+        request_example = {"input": test_content.get("input") or {}}
+        response_example = public_prediction_response(test_content.get("prediction") or {}, deployment)
+        return clean_json({"publication": output, "api_key": new_key, "api_key_is_new": new_key is not None, "request_example": request_example, "response_example": response_example})
+    except HTTPException:
+        raise
+    except requests.HTTPError as exc:
+        raise HTTPException(status_code=500, detail=f"Supabase request failed: {exc.response.text[:500]}") from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail="Unable to publish this pipe.") from exc
+
+
+@app.post("/published-pipe-status")
+def published_pipe_status(request: PipeIdRequest, authorization: str | None = Header(default=None)):
+    require_config()
+    user = require_user(authorization)
+    try:
+        load_owned_pipe(request.pipe_id, user["id"])
+        publication = load_publication(request.pipe_id)
+        return publication_status_payload(publication, load_active_deployment(publication) if publication else None)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail="Unable to load publication status.") from exc
+
+
+@app.post("/rotate-published-pipe-key")
+def rotate_published_pipe_key(request: PipeIdRequest, authorization: str | None = Header(default=None)):
+    require_config()
+    user = require_user(authorization)
+    try:
+        load_owned_pipe(request.pipe_id, user["id"])
+        publication = load_publication(request.pipe_id)
+        if not publication:
+            raise HTTPException(status_code=404, detail="This pipe is not published yet.")
+        new_key = generate_api_key()
+        publication = rest_patch("pipe_publications", {"api_key_hash": hash_api_key(new_key), "api_key_prefix": api_key_prefix(new_key), "last_key_rotated_at": now_iso()}, params={"pipe_id": f"eq.{request.pipe_id}"})[0]
+        return clean_json({"api_key": new_key, "api_key_is_new": True, **publication_status_payload(publication, load_active_deployment(publication))})
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail="Unable to rotate API key.") from exc
+
+
+@app.post("/unpublish-pipe")
+def unpublish_pipe(request: PipeIdRequest, authorization: str | None = Header(default=None)):
+    require_config()
+    user = require_user(authorization)
+    try:
+        load_owned_pipe(request.pipe_id, user["id"])
+        publication = load_publication(request.pipe_id)
+        if not publication:
+            raise HTTPException(status_code=404, detail="This pipe is not published yet.")
+        if publication.get("active_deployment_id"):
+            rest_patch("pipe_deployments", {"status": "unpublished"}, params={"id": f"eq.{publication['active_deployment_id']}"})
+        publication = rest_patch("pipe_publications", {"is_live": False, "unpublished_at": now_iso()}, params={"pipe_id": f"eq.{request.pipe_id}"})[0]
+        output = {"step_key": "publish_pipe", "status": "completed", "publication_status": "unpublished", "public_id": publication.get("public_id"), "active_version": publication.get("active_version"), "endpoint_url": endpoint_url(publication.get("public_id")), "api_key_prefix": publication.get("api_key_prefix"), "unpublished_at": publication.get("unpublished_at")}
+        rest_post("pipe_step_outputs", {"pipe_id": request.pipe_id, "step_key": "publish_pipe", "status": "completed", "output": output}, params={"on_conflict": "pipe_id,step_key"}, prefer="resolution=merge-duplicates,return=representation")
+        return publication_status_payload(publication, load_active_deployment(publication))
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail="Unable to unpublish this pipe.") from exc
+
+
+@app.post("/v1/pipes/{public_id}/predict")
+def public_predict(public_id: str, request: PublicPredictRequest, authorization: str | None = Header(default=None), x_mlp_api_key: str | None = Header(default=None, alias="X-MLP-API-Key")):
+    require_config()
+    raw_key = extract_api_key(authorization, x_mlp_api_key)
+    if not raw_key:
+        raise HTTPException(status_code=401, detail="Missing API key.")
+    try:
+        publication = load_publication_by_public_id(public_id)
+        if not publication or not verify_api_key(raw_key, publication.get("api_key_hash")):
+            raise HTTPException(status_code=401, detail="Invalid API key.")
+        if not publication.get("is_live"):
+            raise HTTPException(status_code=410, detail="This pipe is not live.")
+        deployment = load_active_deployment(publication)
+        if not deployment or deployment.get("status") != "active":
+            raise HTTPException(status_code=410, detail="This pipe is not live.")
+        trained_artifact = get_single("artifacts", {"id": f"eq.{deployment['trained_models_artifact_id']}", "select": "id,content"})
+        if not trained_artifact:
+            raise HTTPException(status_code=410, detail="This pipe is not live.")
+        trained_content = trained_artifact.get("content") or {}
+        schema = deployment.get("input_schema") or {}
+        fields = schema.get("fields") or []
+        if not isinstance(request.input, dict):
+            raise HTTPException(status_code=400, detail="Request body must include an input object.")
+        row = coerce_prediction_input(request.input, fields)
+        frame = pd.DataFrame([row], columns=[field["name"] for field in fields])
+        pipeline = decode_recommended_pipeline(trained_content.get("recommended_model_bundle") or {})
+        prediction = prediction_payload_for_pipeline(trained_content.get("task_type"), pipeline, frame)
+        return public_prediction_response(prediction, deployment)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail="Unable to run prediction for this request.") from exc
 
 
 @app.post("/test-prediction")

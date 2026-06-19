@@ -131,6 +131,19 @@ export type TestPredictionStepOutput = {
   storage: { format: "json"; uri: string };
 };
 
+export type PublishPipeStepOutput = {
+  step_key: "publish_pipe";
+  status: "completed";
+  publication_status: "live" | "unpublished";
+  public_id: string;
+  active_version: number;
+  active_deployment_id?: string;
+  endpoint_url: string;
+  api_key_prefix: string;
+  published_at?: string;
+  unpublished_at?: string;
+};
+
 export type BuilderStepKey =
   | "select_dataset"
   | "clean_data"
@@ -153,6 +166,8 @@ export type PipeCardMetadata = {
   primaryMetricName: string | null;
   primaryMetricValue: number | null;
   lastPrediction: string | number | boolean | null;
+  publicationStatus: "live" | "unpublished" | null;
+  deployedVersion: number | null;
   summary: string;
 };
 
@@ -236,8 +251,12 @@ function buildPipeCardMetadata(pipe: Pipe, outputs: StepOutputRow[]): PipeCardMe
   const trainOutput = byStep.get("train_models") ?? {};
   const reviewOutput = byStep.get("review_results") ?? {};
   const testOutput = byStep.get("test_prediction") ?? {};
+  const publishOutput = byStep.get("publish_pipe") ?? {};
+  const rawPublicationStatus = asString(publishOutput.publication_status);
+  const publicationStatus: PipeCardMetadata["publicationStatus"] = rawPublicationStatus === "live" || rawPublicationStatus === "unpublished" ? rawPublicationStatus : null;
   const isStepComplete = (stepKey: BuilderStepKey) => {
     if (!byStep.has(stepKey)) return false;
+    if (stepKey === "publish_pipe") return byStep.get("publish_pipe")?.publication_status === "live";
     if (stepKey !== "review_results") return true;
     const reviewAcknowledged = byStep.get("review_results")?.review_acknowledged;
     return reviewAcknowledged === undefined || reviewAcknowledged === true;
@@ -256,6 +275,8 @@ function buildPipeCardMetadata(pipe: Pipe, outputs: StepOutputRow[]): PipeCardMe
     primaryMetricName: asString(reviewOutput.primary_metric_name) ?? asString(trainOutput.primary_metric_name),
     primaryMetricValue: asNumber(reviewOutput.primary_metric_value) ?? asNumber(trainOutput.primary_metric_value),
     lastPrediction: typeof testOutput.prediction === "string" || typeof testOutput.prediction === "number" || typeof testOutput.prediction === "boolean" ? testOutput.prediction : null,
+    publicationStatus,
+    deployedVersion: asNumber(publishOutput.active_version),
   };
   return { ...baseMetadata, summary: buildPipeSummary(pipe, baseMetadata) };
 }
@@ -412,6 +433,10 @@ export async function acknowledgeReviewResults(pipeId: string): Promise<ReviewRe
 
 export async function getTestPredictionStepOutput(pipeId: string): Promise<TestPredictionStepOutput | null> {
   return getStepOutput<TestPredictionStepOutput>(pipeId, "test_prediction");
+}
+
+export async function getPublishPipeStepOutput(pipeId: string): Promise<PublishPipeStepOutput | null> {
+  return getStepOutput<PublishPipeStepOutput>(pipeId, "publish_pipe");
 }
 
 export async function getArtifactById(artifactId: string): Promise<ArtifactRecord | null> {

@@ -7,6 +7,7 @@ type TestPredictionStepProps = {
   reviewResultsOutput: ReviewResultsStepOutput | null;
   initialTestPredictionOutput: TestPredictionStepOutput | null;
   onCompleted: (output: TestPredictionStepOutput) => void;
+  onContinueToPublish: () => void;
   onBackToReviewResults: () => void;
 };
 
@@ -92,7 +93,9 @@ type RepresentativeTree = {
   tree_prediction: string | number | boolean;
   agrees_with_final_prediction: boolean;
   confidence: number | null;
-  omitted_decision_count?: number;
+  total_decision_count?: number;
+  visible_decision_count?: number;
+  hidden_decision_count?: number;
   leaf_summary: string;
   decision_path: Array<{
     step: number;
@@ -191,11 +194,7 @@ function stableInputKey(input: Record<string, unknown>) {
   return JSON.stringify(Object.keys(input).sort().map((key) => [key, input[key]]));
 }
 
-function roleLabel(role: string) {
-  return role.replaceAll("_", " ").replace(/\b\w/g, (letter) => letter.toUpperCase());
-}
-
-export function TestPredictionStep({ pipeId, reviewResultsOutput, onCompleted, onBackToReviewResults }: TestPredictionStepProps) {
+export function TestPredictionStep({ pipeId, reviewResultsOutput, onCompleted, onContinueToPublish, onBackToReviewResults }: TestPredictionStepProps) {
   const [schema, setSchema] = useState<PredictionSchemaResponse | null>(null);
   const [formValues, setFormValues] = useState<Record<string, string | boolean>>({});
   const [loadingSchema, setLoadingSchema] = useState(false);
@@ -210,6 +209,7 @@ export function TestPredictionStep({ pipeId, reviewResultsOutput, onCompleted, o
   const [explanationError, setExplanationError] = useState<string | null>(null);
   const [selectedTreeIndex, setSelectedTreeIndex] = useState<number | null>(null);
   const [selectedTreeDetail, setSelectedTreeDetail] = useState<TreeDetail | null>(null);
+  const [showFullTreePath, setShowFullTreePath] = useState(false);
   const [loadingTreeDetail, setLoadingTreeDetail] = useState(false);
   const [treeDetailError, setTreeDetailError] = useState<string | null>(null);
   const [sampleContext, setSampleContext] = useState<SampleContext | null>(null);
@@ -303,6 +303,7 @@ export function TestPredictionStep({ pipeId, reviewResultsOutput, onCompleted, o
   async function loadTreeDetail(treeIndex: number, inputForTree: Record<string, string | boolean> = formValues) {
     if (!reviewResultsOutput) return;
     setSelectedTreeIndex(treeIndex);
+    setShowFullTreePath(false);
     setLoadingTreeDetail(true);
     setTreeDetailError(null);
     try {
@@ -452,7 +453,7 @@ export function TestPredictionStep({ pipeId, reviewResultsOutput, onCompleted, o
         <h3 className="font-semibold">Selected tree detail</h3>
         {loadingTreeDetail ? <p className="mt-2 text-sm text-black/60">Loading this tree's decision path…</p> : null}
         {treeDetailError ? <p className="mt-2 rounded-2xl bg-red-500/10 px-4 py-3 text-sm text-red-700">{treeDetailError}</p> : null}
-        {selectedTree ? <><p className="mt-2 text-sm text-black/65">Tree {selectedTree.tree_index + 1} — {roleLabel(selectedTree.role)}. {selectedTree.agrees_with_final_prediction ? "Agrees with the forest." : "Predicts a different class than the forest."}</p><p className="mt-1 text-sm text-black/65">This tree predicts: {displayValue(selectedTree.tree_prediction)}{selectedTree.confidence !== null ? ` · Tree confidence: ${confidenceLabel(selectedTree.confidence)}` : ""}</p><ol className="mt-4 space-y-2 text-sm">{selectedTree.decision_path.map((step) => <li key={step.step} className="rounded-2xl bg-white/70 px-3 py-2"><span className="font-medium">{step.step}.</span> {step.display_text}<span className="ml-2 text-black/45">input value: {displayValue(step.input_value)}</span></li>)}</ol>{(selectedTree.hidden_step_count ?? selectedTree.omitted_decision_count) ? <p className="mt-3 text-xs text-black/50">{selectedTree.hidden_step_count ?? selectedTree.omitted_decision_count} additional decisions were made in this tree.</p> : null}<p className="mt-3 text-sm font-medium">{selectedTree.leaf_summary}</p></> : !loadingTreeDetail ? <p className="mt-2 text-sm text-black/60">Select a tree tile to inspect its real decision path.</p> : null}
+        {selectedTree ? <><p className="mt-2 text-sm text-black/65">Tree {selectedTree.tree_index + 1} — {selectedTree.agrees_with_final_prediction ? "agrees with the forest" : "predicts a different class than the forest"}</p><p className="mt-1 text-sm text-black/65">This tree predicts: {displayValue(selectedTree.tree_prediction)}{selectedTree.confidence !== null ? ` · This tree’s leaf vote: ${confidenceLabel(selectedTree.confidence)} for ${displayValue(selectedTree.tree_prediction)}` : ""}</p>{selectedTree.hidden_decision_count ? <p className="mt-3 rounded-2xl bg-black/5 p-3 text-xs leading-5 text-black/60">This tree made {selectedTree.total_decision_count} successive yes/no checks before reaching its prediction. To keep this view readable, we show the first {selectedTree.visible_decision_count} checks. The {selectedTree.hidden_decision_count} remaining checks are intermediate steps in the same path — they are not separate predictions.</p> : null}<ol className="mt-4 space-y-2 text-sm">{(showFullTreePath ? selectedTree.decision_path : selectedTree.decision_path.slice(0, selectedTree.visible_decision_count ?? 8)).map((step) => <li key={step.step} className="rounded-2xl bg-white/70 px-3 py-2"><span className="font-medium">{step.step}.</span> {step.display_text}<span className="ml-2 text-black/45">Your value: {displayValue(step.input_value)}</span></li>)}</ol>{selectedTree.hidden_decision_count && !showFullTreePath ? <button type="button" onClick={() => setShowFullTreePath(true)} className="mt-3 text-xs font-medium underline">Show all {selectedTree.total_decision_count} checks</button> : null}</> : !loadingTreeDetail ? <p className="mt-2 text-sm text-black/60">Select a tree tile to inspect its real decision path.</p> : null}
       </div> : null}
       {modelExplanation.linear_contributions ? <div className="rounded-3xl border border-black/10 bg-white/60 p-5">
         <h3 className="font-semibold">Signals behind this prediction</h3>
@@ -547,5 +548,6 @@ export function TestPredictionStep({ pipeId, reviewResultsOutput, onCompleted, o
         </section> : <section className="rounded-3xl border border-black/10 bg-white/60 p-5"><h3 className="font-semibold">Prediction result</h3><p className="mt-2 text-sm text-black/60">Ready to predict. The known target remains hidden until you run the model on an unchanged validation example.</p></section>}
       </aside>
     </div> : explanationContent}
+    {result ? <div className="flex justify-end"><button type="button" onClick={onContinueToPublish} className="rounded-full bg-black px-5 py-3 text-sm font-medium text-white">Continue to publish pipe →</button></div> : null}
   </div>;
 }
