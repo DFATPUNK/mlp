@@ -306,6 +306,13 @@ class ExplainPredictionRequest(BaseModel):
     input: dict[str, Any]
 
 
+class ExplainPredictionTreeRequest(BaseModel):
+    pipe_id: str
+    review_results_artifact_id: str
+    input: dict[str, Any]
+    tree_index: int
+
+
 @app.get("/health")
 def health():
     return {"status": "ok"}
@@ -1081,6 +1088,7 @@ def review_results(request: ReviewResultsRequest, authorization: str | None = He
             "recommended_model_name": recommended_model.get("model_name"),
             "primary_metric_name": recommended_model.get("primary_metric_name"),
             "primary_metric_value": recommended_model.get("primary_metric_value"),
+            "review_acknowledged": False,
             "storage": {"format": "json", "uri": f"artifact:{artifact['id']}"},
         }
         rest_post(
@@ -1491,8 +1499,38 @@ def features_consulted_for_forest(forest, transformed_input, feature_info: list[
     return [{"feature": feature, "trees_used": used, "tree_count": tree_count, "share_of_trees": clean_json(used / tree_count if tree_count else 0)} for feature, used in ranked]
 
 
+def resolve_tree_class_label(tree_raw_class: Any, tree_classes: Any, forest_classes: Any):
+    forest_labels = [clean_json(value) for value in list(forest_classes)]
+    tree_labels = [clean_json(value) for value in list(tree_classes)] if tree_classes is not None else []
+    raw_clean = clean_json(tree_raw_class)
+    if any(str(raw_clean) == str(label) for label in forest_labels):
+        return next(label for label in forest_labels if str(raw_clean) == str(label))
+    if isinstance(raw_clean, (int, np.integer)) and 0 <= int(raw_clean) < len(forest_labels):
+        return forest_labels[int(raw_clean)]
+    if isinstance(raw_clean, float) and raw_clean.is_integer() and 0 <= int(raw_clean) < len(forest_labels):
+        return forest_labels[int(raw_clean)]
+    if isinstance(raw_clean, str):
+        stripped = raw_clean.strip()
+        if stripped.isdigit() and 0 <= int(stripped) < len(forest_labels):
+            return forest_labels[int(stripped)]
+    if len(tree_labels) == len(forest_labels):
+        for idx, tree_label in enumerate(tree_labels):
+            if str(raw_clean) == str(tree_label):
+                return forest_labels[idx]
+    raise HTTPException(status_code=500, detail=f"Unable to align tree class label {raw_clean!r} to Random Forest class labels.")
+
+
+def tree_class_prediction_record(estimator, transformed_input, forest_classes, final_prediction):
+    probabilities = estimator.predict_proba(transformed_input)[0]
+    top_index = int(np.argmax(probabilities))
+    raw_tree_label = estimator.classes_[top_index] if top_index < len(estimator.classes_) else top_index
+    tree_prediction = resolve_tree_class_label(raw_tree_label, getattr(estimator, "classes_", []), forest_classes)
+    agrees = str(tree_prediction) == str(final_prediction)
+    return tree_prediction, agrees, float(probabilities[top_index])
+
+
 def representative_detail(estimator, transformed_input, feature_info, tree_index: int, role: str, prediction: Any, agrees: bool, confidence: float | None):
-    path, omitted_count, clean_prediction = tree_decision_path(estimator, transformed_input, feature_info, prediction)
+    path, hidden_count, clean_prediction = tree_decision_path(estimator, transformed_input, feature_info, prediction)
     return {
         "tree_index": tree_index,
         "role": role,
@@ -1500,7 +1538,8 @@ def representative_detail(estimator, transformed_input, feature_info, tree_index
         "agrees_with_final_prediction": agrees,
         "confidence": clean_json(confidence),
         "decision_path": path,
-        "omitted_decision_count": omitted_count,
+        "hidden_step_count": hidden_count,
+        "omitted_decision_count": hidden_count,
         "leaf_summary": f"This tree predicts: {clean_prediction}",
     }
 
@@ -1511,52 +1550,59 @@ def build_random_forest_classifier_explanation(pipeline, trained_content: dict[s
     feature_info = transformed_feature_names(preprocessor, trained_content)
     final_prediction = prediction["value"]
     final_confidence = prediction.get("confidence")
-    classes = [clean_json(item) for item in getattr(forest, "classes_", [])]
-    final_class_index = next((idx for idx, label in enumerate(classes) if str(label) == str(final_prediction)), None)
+    forest_classes = getattr(forest, "classes_", [])
+    forest_labels = [clean_json(value) for value in list(forest_classes)]
+    probability_sums = {str(label): 0.0 for label in forest_labels}
     tree_records = []
     agreeing = []
     dissenting = []
     for index, estimator in enumerate(forest.estimators_[:50]):
-        tree_prediction = clean_json(estimator.predict(transformed)[0])
-        proba = None
-        try:
-            probabilities = estimator.predict_proba(transformed)[0]
-            if final_class_index is not None and final_class_index < len(probabilities):
-                proba = float(probabilities[final_class_index])
-        except Exception:
-            proba = None
-        agrees = str(tree_prediction) == str(final_prediction)
-        record = {"tree_index": index, "tree_prediction": tree_prediction, "agrees_with_final_prediction": agrees, "vote_strength": clean_json(proba), "role": "other"}
+        tree_prediction, agrees, vote_strength = tree_class_prediction_record(estimator, transformed, forest_classes, final_prediction)
+        tree_probabilities = estimator.predict_proba(transformed)[0]
+        for class_index, class_probability in enumerate(tree_probabilities):
+            raw_label = estimator.classes_[class_index] if class_index < len(estimator.classes_) else class_index
+            aligned_label = resolve_tree_class_label(raw_label, getattr(estimator, "classes_", []), forest_classes)
+            probability_sums[str(aligned_label)] = probability_sums.get(str(aligned_label), 0.0) + float(class_probability)
+        record = {"tree_index": index, "tree_prediction": tree_prediction, "agrees_with_final_prediction": agrees, "vote_strength": clean_json(vote_strength), "role": "other"}
         tree_records.append(record)
-        (agreeing if agrees else dissenting).append((index, estimator, tree_prediction, proba, record))
+        (agreeing if agrees else dissenting).append((index, estimator, tree_prediction, vote_strength, record))
+    tree_count = len(tree_records)
+    agreement_count = len(agreeing)
+    disagreement_count = len(dissenting)
+    if agreement_count + disagreement_count != tree_count:
+        raise HTTPException(status_code=500, detail="Random Forest tree agreement invariant failed.")
+    class_probabilities = prediction.get("class_probabilities") or {}
+    if tree_count and class_probabilities:
+        for label, summed_probability in probability_sums.items():
+            expected = class_probabilities.get(label)
+            if expected is not None and abs((summed_probability / tree_count) - float(expected)) > 0.05:
+                raise HTTPException(status_code=500, detail="Random Forest tree probability alignment invariant failed.")
     representative = min(agreeing, key=lambda item: abs((item[3] or 0) - (final_confidence or 0)), default=None)
     confident = max(agreeing, key=lambda item: item[3] if item[3] is not None else -1, default=None)
     dissenter = max(dissenting, key=lambda item: item[3] if item[3] is not None else -1, default=None)
-    selected = []
+    selected_indices = set()
     for role, item in [("representative", representative), ("confident", confident), ("dissenting", dissenter)]:
-        if item and item[0] not in [existing[0] for existing in selected]:
+        if item and item[0] not in selected_indices:
             item[4]["role"] = role
-            selected.append((item[0], item[1], item[2], item[3], item[4], role))
-    representative_trees = [representative_detail(estimator, transformed, feature_info, index, role, tree_prediction, record["agrees_with_final_prediction"], proba) for index, estimator, tree_prediction, proba, record, role in selected[:3]]
-    agreement_count = len(agreeing)
-    disagreement_count = len(tree_records) - agreement_count
-    tree_count = len(tree_records)
-    vote_summary = f"{agreement_count} of {tree_count} trees predicted {final_prediction}."
+            selected_indices.add(item[0])
+    vote_summary = f"{agreement_count} of {tree_count} trees had {final_prediction} as their top class."
     if disagreement_count:
-        vote_summary += f" {disagreement_count} trees predicted a different class."
+        vote_summary += f" {disagreement_count} trees had a different top class."
     else:
-        vote_summary += " All trees in this forest agreed with the final prediction."
+        vote_summary += " All trees agreed with the final prediction."
     return {
         "supported": True,
         "model_type": "RandomForestClassifier",
         "model_name": trained_content.get("recommended_model_name") or "Random Forest",
         "headline": f"The forest predicted {final_prediction} for this input.",
-        "plain_english_summary": "A Random Forest is a group of decision trees. Each tree looks at the same input and makes its own prediction. The forest combines these tree predictions to produce the final result.",
-        "caveats": ["This explains this specific prediction only.", "It does not prove that a feature causes the outcome.", "Model confidence is not a guarantee of truth."],
+        "plain_english_summary": "A Random Forest is a group of decision trees. Each tree looks at the same input and makes its own prediction. The forest combines averaged tree probabilities to produce the final result.",
+        "caveats": ["Tiles show each tree's top predicted class. The forest's final confidence is based on averaged tree probabilities.", "This is local to this input.", "It does not prove that a feature causes the outcome.", "The forest combines multiple features together."],
         "forest_vote": {"tree_count": tree_count, "final_prediction": final_prediction, "agreement_count": agreement_count, "disagreement_count": disagreement_count, "vote_summary": vote_summary, "trees": tree_records},
         "regression_summary": None,
-        "representative_trees": representative_trees,
+        "representative_trees": [],
         "features_consulted": features_consulted_for_forest(forest, transformed, feature_info),
+        "linear_contributions": None,
+        "dummy_explanation": None,
     }
 
 
@@ -1573,44 +1619,174 @@ def build_random_forest_regressor_explanation(pipeline, trained_content: dict[st
     representative = min(tree_predictions, key=lambda item: abs(item[2] - mean_value), default=None)
     high = max(tree_predictions, key=lambda item: item[2], default=None)
     low = min(tree_predictions, key=lambda item: item[2], default=None)
-    selected = []
+    role_by_index = {}
     for role, item in [("representative", representative), ("high_estimate", high), ("low_estimate", low)]:
-        if item and item[0] not in [existing[0] for existing in selected]:
-            selected.append((item[0], item[1], item[2], role))
-    representative_trees = [representative_detail(estimator, transformed, feature_info, index, role, tree_prediction, True, None) for index, estimator, tree_prediction, role in selected[:3]]
+        if item and item[0] not in role_by_index:
+            role_by_index[item[0]] = role
     return {
         "supported": True,
         "model_type": "RandomForestRegressor",
         "model_name": trained_content.get("recommended_model_name") or "Random Forest Regressor",
         "headline": f"The forest average is {clean_json(mean_value)} for this input.",
         "plain_english_summary": "A Random Forest Regressor is a group of decision trees. Each tree estimates a numeric value. The forest averages those estimates to produce the final prediction.",
-        "caveats": ["This explains this specific prediction only.", "It does not prove that a feature causes the target value.", "The model combines many features together."],
+        "caveats": ["This is local to this input.", "It does not prove that a feature causes the target value.", "The forest combines multiple features together."],
         "forest_vote": None,
-        "regression_summary": {"tree_count": len(tree_predictions), "forest_average": clean_json(mean_value), "min_tree_prediction": clean_json(float(np.min(values)) if len(values) else None), "max_tree_prediction": clean_json(float(np.max(values)) if len(values) else None), "tree_prediction_std": clean_json(std_value), "within_reasonable_band_count": within_band, "tree_estimates": [{"tree_index": index, "tree_prediction": clean_json(value)} for index, _, value in tree_predictions]},
-        "representative_trees": representative_trees,
+        "regression_summary": {"tree_count": len(tree_predictions), "forest_average": clean_json(mean_value), "min_tree_prediction": clean_json(float(np.min(values)) if len(values) else None), "max_tree_prediction": clean_json(float(np.max(values)) if len(values) else None), "tree_prediction_std": clean_json(std_value), "within_reasonable_band_count": within_band, "tree_estimates": [{"tree_index": index, "tree_prediction": clean_json(value), "role": role_by_index.get(index, "other")} for index, _, value in tree_predictions]},
+        "representative_trees": [],
         "features_consulted": features_consulted_for_forest(forest, transformed, feature_info),
+        "linear_contributions": None,
+        "dummy_explanation": None,
+    }
+
+
+def top_contributions(values, feature_info, coefficients, limit=8):
+    contributions = []
+    flat_values = np.asarray(values).ravel()
+    flat_coefficients = np.asarray(coefficients).ravel()
+    for index, (input_value, coefficient) in enumerate(zip(flat_values, flat_coefficients)):
+        contribution = float(input_value) * float(coefficient)
+        feature = feature_info[index]["display"] if index < len(feature_info) else f"Technical feature {index}"
+        contributions.append({"feature": feature, "input_value": clean_json(float(input_value)), "coefficient": clean_json(float(coefficient)), "contribution": clean_json(contribution)})
+    positives = sorted([item for item in contributions if item["contribution"] >= 0], key=lambda item: abs(item["contribution"]), reverse=True)[:limit]
+    negatives = sorted([item for item in contributions if item["contribution"] < 0], key=lambda item: abs(item["contribution"]), reverse=True)[:limit]
+    return positives, negatives
+
+
+def build_linear_explanation(task_type: str, pipeline, trained_content: dict[str, Any], frame: pd.DataFrame, prediction: dict[str, Any]):
+    transformed, preprocessor = dense_transformed_input(pipeline, frame)
+    model = pipeline.named_steps.get("model")
+    feature_info = transformed_feature_names(preprocessor, trained_content)
+    model_type = model.__class__.__name__
+    if isinstance(model, LogisticRegression):
+        coefficients = model.coef_
+        class_index = 0
+        classes = [clean_json(item) for item in getattr(model, "classes_", [])]
+        if len(classes) > 2:
+            class_index = next((idx for idx, label in enumerate(classes) if str(label) == str(prediction["value"])), 0)
+        elif len(classes) == 2:
+            class_index = 0 if str(prediction["value"]) == str(classes[1]) else 0
+        coef_row = coefficients[class_index]
+        if len(classes) == 2 and str(prediction["value"]) != str(classes[1]):
+            coef_row = -coef_row
+        positives, negatives = top_contributions(transformed, feature_info, coef_row)
+        return {
+            "supported": True,
+            "model_type": model_type,
+            "model_name": trained_content.get("recommended_model_name") or "Logistic Regression",
+            "headline": "Signals behind this prediction",
+            "plain_english_summary": "Logistic Regression combines weighted input signals. These transformed features pushed this prediction most strongly toward or away from the predicted class.",
+            "caveats": ["Feature contributions are model calculations, not proof of real-world cause.", "Categorical values may be represented as encoded model features."],
+            "forest_vote": None,
+            "regression_summary": None,
+            "representative_trees": [],
+            "features_consulted": [],
+            "linear_contributions": {"intercept": clean_json(float(np.ravel(model.intercept_)[class_index if len(np.ravel(model.intercept_)) > 1 else 0])), "positive": positives, "negative": negatives},
+            "dummy_explanation": None,
+        }
+    if isinstance(model, Ridge):
+        positives, negatives = top_contributions(transformed, feature_info, model.coef_)
+        return {
+            "supported": True,
+            "model_type": model_type,
+            "model_name": trained_content.get("recommended_model_name") or "Ridge Regression",
+            "headline": "Signals behind this numeric prediction",
+            "plain_english_summary": "Ridge Regression estimates a number by combining weighted input signals.",
+            "caveats": ["Feature contributions are model calculations, not proof of real-world cause.", "Large coefficients can be affected by scaling and correlated features."],
+            "forest_vote": None,
+            "regression_summary": None,
+            "representative_trees": [],
+            "features_consulted": [],
+            "linear_contributions": {"intercept": clean_json(float(np.ravel(model.intercept_)[0])), "positive": positives, "negative": negatives},
+            "dummy_explanation": None,
+        }
+    return None
+
+
+def build_dummy_explanation(pipeline, trained_content: dict[str, Any], prediction: dict[str, Any]):
+    model = pipeline.named_steps.get("model")
+    strategy = getattr(model, "strategy", "baseline")
+    return {
+        "supported": True,
+        "model_type": model.__class__.__name__,
+        "model_name": trained_content.get("recommended_model_name") or model.__class__.__name__,
+        "headline": "This baseline model does not make a feature-by-feature decision.",
+        "plain_english_summary": f"This dummy baseline uses the '{strategy}' strategy, so it predicts from a simple rule rather than learning detailed feature patterns.",
+        "caveats": ["Use this as a sanity-check baseline, not as a detailed explanation of input features."],
+        "forest_vote": None,
+        "regression_summary": None,
+        "representative_trees": [],
+        "features_consulted": [],
+        "linear_contributions": None,
+        "dummy_explanation": {"strategy": strategy, "prediction": prediction.get("value")},
     }
 
 
 def build_prediction_explanation(task_type: str, pipeline, trained_content: dict[str, Any], frame: pd.DataFrame, prediction: dict[str, Any]):
     model = getattr(pipeline, "named_steps", {}).get("model")
-    model_name = trained_content.get("recommended_model_name") or model.__class__.__name__ if model is not None else "Model"
+    model_name = (trained_content.get("recommended_model_name") or model.__class__.__name__) if model is not None else "Model"
     if isinstance(model, RandomForestClassifier):
         return build_random_forest_classifier_explanation(pipeline, trained_content, frame, prediction)
     if isinstance(model, RandomForestRegressor):
         return build_random_forest_regressor_explanation(pipeline, trained_content, frame, prediction)
+    if isinstance(model, (LogisticRegression, Ridge)):
+        linear = build_linear_explanation(task_type, pipeline, trained_content, frame, prediction)
+        if linear:
+            return linear
+    if isinstance(model, (DummyClassifier, DummyRegressor)):
+        return build_dummy_explanation(pipeline, trained_content, prediction)
     return {
         "supported": False,
         "model_type": model.__class__.__name__ if model is not None else "UnknownModel",
         "model_name": model_name,
-        "headline": "This model does not yet have an interactive tree explanation.",
-        "plain_english_summary": "This prediction is real, but this model type does not expose Random Forest tree votes or paths in this MVP.",
-        "caveats": ["No tree votes or decision paths are shown because this is not a supported Random Forest model."],
+        "headline": "An interactive explanation is not available for this model yet.",
+        "plain_english_summary": "This prediction is real, but this model type does not yet have a model-specific interactive explanation.",
+        "caveats": ["No tree votes, decision paths, or feature contributions are shown for this unsupported model."],
         "forest_vote": None,
         "regression_summary": None,
         "representative_trees": [],
         "features_consulted": [],
+        "linear_contributions": None,
+        "dummy_explanation": None,
     }
+
+
+def prediction_context_from_request(pipe_id: str, review_results_artifact_id: str, user_id: str, input_payload: dict[str, Any]):
+    load_owned_pipe(pipe_id, user_id)
+    _, _, trained_content, split_artifact = load_prediction_lineage(pipe_id, review_results_artifact_id)
+    task_type = trained_content.get("task_type")
+    target_column = trained_content.get("target_column")
+    if task_type not in {"tabular_classification", "tabular_regression"} or not target_column:
+        raise HTTPException(status_code=400, detail="Unsupported or missing task metadata.")
+    schema = build_prediction_input_schema(trained_content, split_artifact)
+    fields = schema.get("fields") or []
+    if not fields:
+        raise HTTPException(status_code=400, detail="No usable input fields were found for this trained model.")
+    row = coerce_prediction_input(input_payload, fields)
+    frame = pd.DataFrame([row], columns=[field["name"] for field in fields])
+    pipeline = decode_recommended_pipeline(trained_content.get("recommended_model_bundle") or {})
+    prediction = prediction_payload_for_pipeline(task_type, pipeline, frame)
+    return task_type, trained_content, frame, pipeline, prediction
+
+
+def build_tree_detail(task_type: str, pipeline, trained_content: dict[str, Any], frame: pd.DataFrame, prediction: dict[str, Any], tree_index: int):
+    model = getattr(pipeline, "named_steps", {}).get("model")
+    if not isinstance(model, (RandomForestClassifier, RandomForestRegressor)):
+        raise HTTPException(status_code=400, detail="Tree details are available only for Random Forest models.")
+    if tree_index < 0 or tree_index >= min(len(model.estimators_), 50):
+        raise HTTPException(status_code=400, detail="tree_index is outside the available explanation range.")
+    transformed, preprocessor = dense_transformed_input(pipeline, frame)
+    feature_info = transformed_feature_names(preprocessor, trained_content)
+    estimator = model.estimators_[tree_index]
+    if isinstance(model, RandomForestClassifier):
+        tree_prediction, agrees, confidence = tree_class_prediction_record(estimator, transformed, getattr(model, "classes_", []), prediction["value"])
+        role = "agreeing" if agrees else "dissenting"
+    else:
+        tree_prediction = clean_json(float(estimator.predict(transformed)[0]))
+        agrees = True
+        confidence = None
+        role = "tree_estimate"
+    detail = representative_detail(estimator, transformed, feature_info, tree_index, role, tree_prediction, agrees, confidence)
+    return {**detail, "hidden_step_count": detail.get("hidden_step_count", 0)}
 
 
 @app.post("/test-prediction-schema")
@@ -1666,22 +1842,24 @@ def explain_prediction(request: ExplainPredictionRequest, authorization: str | N
     require_config()
     user = require_user(authorization)
     try:
-        load_owned_pipe(request.pipe_id, user["id"])
-        _, _, trained_content, split_artifact = load_prediction_lineage(request.pipe_id, request.review_results_artifact_id)
-        task_type = trained_content.get("task_type")
-        target_column = trained_content.get("target_column")
-        if task_type not in {"tabular_classification", "tabular_regression"} or not target_column:
-            raise HTTPException(status_code=400, detail="Unsupported or missing task metadata.")
-        schema = build_prediction_input_schema(trained_content, split_artifact)
-        fields = schema.get("fields") or []
-        if not fields:
-            raise HTTPException(status_code=400, detail="No usable input fields were found for this trained model.")
-        row = coerce_prediction_input(request.input, fields)
-        frame = pd.DataFrame([row], columns=[field["name"] for field in fields])
-        pipeline = decode_recommended_pipeline(trained_content.get("recommended_model_bundle") or {})
-        prediction = prediction_payload_for_pipeline(task_type, pipeline, frame)
+        task_type, trained_content, frame, pipeline, prediction = prediction_context_from_request(request.pipe_id, request.review_results_artifact_id, user["id"], request.input)
         explanation = build_prediction_explanation(task_type, pipeline, trained_content, frame, prediction)
         return clean_json({"task_type": task_type, "prediction": prediction, "model_explanation": explanation})
+    except HTTPException:
+        raise
+    except requests.HTTPError as exc:
+        raise HTTPException(status_code=500, detail=f"Supabase request failed: {exc.response.text[:500]}") from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.post("/explain-prediction-tree")
+def explain_prediction_tree(request: ExplainPredictionTreeRequest, authorization: str | None = Header(default=None)):
+    require_config()
+    user = require_user(authorization)
+    try:
+        task_type, trained_content, frame, pipeline, prediction = prediction_context_from_request(request.pipe_id, request.review_results_artifact_id, user["id"], request.input)
+        return clean_json(build_tree_detail(task_type, pipeline, trained_content, frame, prediction, request.tree_index))
     except HTTPException:
         raise
     except requests.HTTPError as exc:

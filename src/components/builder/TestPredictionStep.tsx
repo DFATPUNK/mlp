@@ -130,12 +130,20 @@ type PredictionExplanation = {
       max_tree_prediction: number;
       tree_prediction_std: number;
       within_reasonable_band_count: number;
-      tree_estimates: Array<{ tree_index: number; tree_prediction: number }>;
+      tree_estimates: Array<{ tree_index: number; tree_prediction: number; role?: string }>;
     };
     representative_trees: RepresentativeTree[];
     features_consulted: Array<{ feature: string; trees_used: number; tree_count: number; share_of_trees: number }>;
+    linear_contributions?: null | {
+      intercept: number | null;
+      positive: Array<{ feature: string; contribution: number; coefficient: number; input_value: number }>;
+      negative: Array<{ feature: string; contribution: number; coefficient: number; input_value: number }>;
+    };
+    dummy_explanation?: null | { strategy: string; prediction: string | number | boolean };
   };
 };
+
+type TreeDetail = RepresentativeTree & { hidden_step_count?: number };
 
 function displayValue(value: unknown) {
   if (value === null || value === undefined) return "—";
@@ -201,6 +209,9 @@ export function TestPredictionStep({ pipeId, reviewResultsOutput, onCompleted, o
   const [loadingExplanation, setLoadingExplanation] = useState(false);
   const [explanationError, setExplanationError] = useState<string | null>(null);
   const [selectedTreeIndex, setSelectedTreeIndex] = useState<number | null>(null);
+  const [selectedTreeDetail, setSelectedTreeDetail] = useState<TreeDetail | null>(null);
+  const [loadingTreeDetail, setLoadingTreeDetail] = useState(false);
+  const [treeDetailError, setTreeDetailError] = useState<string | null>(null);
   const [sampleContext, setSampleContext] = useState<SampleContext | null>(null);
   const [seenValidationRowIndices, setSeenValidationRowIndices] = useState<number[]>([]);
   const [exampleNotice, setExampleNotice] = useState<string | null>(null);
@@ -225,8 +236,6 @@ export function TestPredictionStep({ pipeId, reviewResultsOutput, onCompleted, o
     void loadSchema();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [reviewResultsOutput]);
-
-  const mappableJson = useMemo(() => JSON.stringify(result?.mappable_output ?? {}, null, 2), [result]);
 
   async function serviceFetch(path: string, body: Record<string, unknown>) {
     const serviceUrl = import.meta.env.VITE_ML_TRAINING_API_URL as string | undefined;
@@ -277,14 +286,38 @@ export function TestPredictionStep({ pipeId, reviewResultsOutput, onCompleted, o
       }) as PredictionExplanation;
       setExplanation(payload);
       setExplanationInputKey(inputKey);
-      const representativeTree = payload.model_explanation.representative_trees[0];
-      setSelectedTreeIndex(representativeTree?.tree_index ?? null);
+      const firstTree = payload.model_explanation.forest_vote?.trees[0]?.tree_index ?? payload.model_explanation.regression_summary?.tree_estimates[0]?.tree_index ?? null;
+      setSelectedTreeIndex(firstTree);
+      setSelectedTreeDetail(null);
+      if (firstTree !== null && firstTree !== undefined) void loadTreeDetail(firstTree, inputForExplanation);
     } catch (caught) {
       setExplanationError(caught instanceof Error ? caught.message : "Unable to explain this prediction.");
       setExplanation(null);
       setExplanationInputKey(null);
+      setSelectedTreeDetail(null);
     } finally {
       setLoadingExplanation(false);
+    }
+  }
+
+  async function loadTreeDetail(treeIndex: number, inputForTree: Record<string, string | boolean> = formValues) {
+    if (!reviewResultsOutput) return;
+    setSelectedTreeIndex(treeIndex);
+    setLoadingTreeDetail(true);
+    setTreeDetailError(null);
+    try {
+      const payload = await serviceFetch("/explain-prediction-tree", {
+        pipe_id: pipeId,
+        review_results_artifact_id: reviewResultsOutput.review_results_artifact_id,
+        input: inputForTree,
+        tree_index: treeIndex,
+      }) as TreeDetail;
+      setSelectedTreeDetail(payload);
+    } catch (caught) {
+      setTreeDetailError(caught instanceof Error ? caught.message : "Unable to load this tree's decision path.");
+      setSelectedTreeDetail(null);
+    } finally {
+      setLoadingTreeDetail(false);
     }
   }
 
@@ -370,6 +403,7 @@ export function TestPredictionStep({ pipeId, reviewResultsOutput, onCompleted, o
   function updateField(field: InputField, value: string | boolean) {
     setFormValues((current) => ({ ...current, [field.name]: value }));
     if (sampleContext) setHasEditedSinceSample(true);
+    setSelectedTreeDetail(null);
   }
 
 
@@ -390,45 +424,49 @@ export function TestPredictionStep({ pipeId, reviewResultsOutput, onCompleted, o
       return <section className="rounded-3xl border border-black/10 bg-white/60 p-6 text-sm text-black/60">Run a prediction first to see how the selected model reached its result.</section>;
     }
     const modelExplanation = explanation.model_explanation;
-    const selectedTree = selectedTreeIndex === null ? modelExplanation.representative_trees[0] ?? null : modelExplanation.representative_trees.find((tree) => tree.tree_index === selectedTreeIndex) ?? null;
-    const selectedTreeHasOnlyVoteSummary = selectedTreeIndex !== null && !selectedTree && modelExplanation.forest_vote?.trees.some((tree) => tree.tree_index === selectedTreeIndex);
+    const selectedTree = selectedTreeDetail;
     return <section className="space-y-5">
       <div className="rounded-3xl border border-black/10 bg-white/60 p-5">
         <h3 className="text-lg font-semibold">Your model: {modelExplanation.model_name}</h3>
         <p className="mt-2 text-sm leading-6 text-black/65">{modelExplanation.plain_english_summary}</p>
-        <p className="mt-2 text-xs text-black/50">The visual below explains this specific prediction. It does not prove why the outcome happens in the real world.</p>
+        <p className="mt-2 text-xs text-black/50">This explains the latest prediction input only. It does not prove why the outcome happens in the real world.</p>
         {!modelExplanation.supported ? <div className="mt-4 rounded-2xl bg-white/70 p-4 text-sm text-black/65"><p className="font-medium">{modelExplanation.headline}</p><p className="mt-2">Prediction: {displayValue(explanation.prediction.value)}{explanation.prediction.confidence !== null ? ` · Model confidence: ${confidenceLabel(explanation.prediction.confidence)}` : ""}</p></div> : null}
       </div>
       {modelExplanation.supported && modelExplanation.forest_vote ? <div className="rounded-3xl border border-black/10 bg-white/60 p-5">
-        <h3 className="font-semibold">Forest vote</h3>
+        <h3 className="font-semibold">Forest decision summary</h3>
         <p className="mt-2 text-sm text-black/65">{modelExplanation.forest_vote.vote_summary}</p>
         <p className="mt-1 text-sm text-black/65">Final prediction: {displayValue(modelExplanation.forest_vote.final_prediction)} · Model confidence: {confidenceLabel(explanation.prediction.confidence)}</p>
-        <div className="mt-3 flex gap-4 text-xs"><span><span className="mr-1 inline-block h-3 w-3 rounded bg-emerald-500" />Agrees with forest</span><span><span className="mr-1 inline-block h-3 w-3 rounded bg-red-400" />Disagrees with forest</span></div>
+        <p className="mt-1 text-xs text-black/50">Tiles show each tree's top predicted class. The forest's final confidence is based on averaged tree probabilities.</p>
+        <div className="mt-3 flex gap-4 text-xs"><span><span className="mr-1 inline-block h-3 w-3 rounded bg-emerald-500" />Green: agrees with final forest prediction</span><span><span className="mr-1 inline-block h-3 w-3 rounded bg-red-400" />Red: predicts a different class</span></div>
         <div className="mt-4 grid grid-cols-10 gap-1 sm:grid-cols-12 md:grid-cols-16">
-          {modelExplanation.forest_vote.trees.map((tree) => <button key={tree.tree_index} type="button" aria-label={`Tree ${tree.tree_index + 1}. Predicts ${displayValue(tree.tree_prediction)}. ${tree.agrees_with_final_prediction ? "Agrees with forest" : "Disagrees with forest"}.`} onClick={() => setSelectedTreeIndex(tree.tree_index)} className={`h-5 rounded ${tree.agrees_with_final_prediction ? "bg-emerald-500" : "bg-red-400"} ${selectedTreeIndex === tree.tree_index ? "ring-2 ring-black ring-offset-2" : ""}`} />)}
+          {modelExplanation.forest_vote.trees.map((tree) => <button key={tree.tree_index} type="button" aria-label={`Tree ${tree.tree_index + 1}. Predicts ${displayValue(tree.tree_prediction)}. ${tree.agrees_with_final_prediction ? "Agrees with forest" : "Disagrees with forest"}.`} onClick={() => void loadTreeDetail(tree.tree_index)} className={`h-5 rounded ${tree.agrees_with_final_prediction ? "bg-emerald-500" : "bg-red-400"} ${selectedTreeIndex === tree.tree_index ? "ring-2 ring-black ring-offset-2" : ""}`} />)}
         </div>
-        {modelExplanation.forest_vote.disagreement_count ? <button type="button" onClick={() => { const dissenting = modelExplanation.representative_trees.find((tree) => tree.role === "dissenting"); if (dissenting) setSelectedTreeIndex(dissenting.tree_index); }} className="mt-4 rounded-full border border-black/10 px-3 py-1 text-xs font-medium">Show a dissenting tree</button> : <p className="mt-4 text-xs text-black/50">All trees in this forest agreed with the final prediction.</p>}
+        {modelExplanation.forest_vote.disagreement_count ? <p className="mt-4 text-xs text-black/50">{modelExplanation.forest_vote.disagreement_count} trees predicted a different class. Click any red tile to inspect that exact tree.</p> : <p className="mt-4 text-xs text-black/50">All trees agreed with the final prediction.</p>}
       </div> : null}
       {modelExplanation.supported && modelExplanation.regression_summary ? <div className="rounded-3xl border border-black/10 bg-white/60 p-5">
         <h3 className="font-semibold">Tree estimates</h3>
         <dl className="mt-3 grid gap-3 text-sm md:grid-cols-2"><div><dt className="text-black/50">Forest average</dt><dd>{displayValue(modelExplanation.regression_summary.forest_average)}</dd></div><div><dt className="text-black/50">Tree estimate range</dt><dd>{displayValue(modelExplanation.regression_summary.min_tree_prediction)} – {displayValue(modelExplanation.regression_summary.max_tree_prediction)}</dd></div><div><dt className="text-black/50">Standard deviation</dt><dd>{displayValue(modelExplanation.regression_summary.tree_prediction_std)}</dd></div><div><dt className="text-black/50">Trees near average</dt><dd>{modelExplanation.regression_summary.within_reasonable_band_count} of {modelExplanation.regression_summary.tree_count}</dd></div></dl>
+        <div className="mt-4 grid grid-cols-10 gap-1 sm:grid-cols-12 md:grid-cols-16">{modelExplanation.regression_summary.tree_estimates.map((tree) => <button key={tree.tree_index} type="button" aria-label={`Tree ${tree.tree_index + 1}. Estimate ${displayValue(tree.tree_prediction)}.`} onClick={() => void loadTreeDetail(tree.tree_index)} className={`h-5 rounded bg-sky-500 ${selectedTreeIndex === tree.tree_index ? "ring-2 ring-black ring-offset-2" : ""}`} />)}</div>
       </div> : null}
-      {selectedTreeHasOnlyVoteSummary ? <div className="rounded-3xl border border-black/10 bg-white/60 p-5 text-sm text-black/60">Detailed paths are shown for representative, confident, and dissenting trees only to keep this explanation compact. Choose one of those highlighted trees to inspect its path.</div> : null}
-      {selectedTree ? <div className="rounded-3xl border border-black/10 bg-white/60 p-5">
-        <h3 className="font-semibold">Inspect a tree</h3>
-        <p className="mt-2 text-sm text-black/65">Tree {selectedTree.tree_index + 1} — {roleLabel(selectedTree.role)}. {selectedTree.agrees_with_final_prediction ? "Agrees with the forest." : "Does not agree with the forest."}</p>
-        <p className="mt-1 text-sm text-black/65">This tree predicts: {displayValue(selectedTree.tree_prediction)}{selectedTree.confidence !== null ? ` · Confidence: ${confidenceLabel(selectedTree.confidence)}` : ""}</p>
-        <ol className="mt-4 space-y-2 text-sm">{selectedTree.decision_path.map((step) => <li key={step.step} className="rounded-2xl bg-white/70 px-3 py-2"><span className="font-medium">{step.step}.</span> {step.display_text}<span className="ml-2 text-black/45">input value: {displayValue(step.input_value)}</span></li>)}</ol>
-        {selectedTree.omitted_decision_count ? <p className="mt-3 text-xs text-black/50">{selectedTree.omitted_decision_count} additional decisions were made in this tree.</p> : null}
-        <p className="mt-3 text-sm font-medium">{selectedTree.leaf_summary}</p>
+      {(modelExplanation.forest_vote || modelExplanation.regression_summary) ? <div className="rounded-3xl border border-black/10 bg-white/60 p-5">
+        <h3 className="font-semibold">Selected tree detail</h3>
+        {loadingTreeDetail ? <p className="mt-2 text-sm text-black/60">Loading this tree's decision path…</p> : null}
+        {treeDetailError ? <p className="mt-2 rounded-2xl bg-red-500/10 px-4 py-3 text-sm text-red-700">{treeDetailError}</p> : null}
+        {selectedTree ? <><p className="mt-2 text-sm text-black/65">Tree {selectedTree.tree_index + 1} — {roleLabel(selectedTree.role)}. {selectedTree.agrees_with_final_prediction ? "Agrees with the forest." : "Predicts a different class than the forest."}</p><p className="mt-1 text-sm text-black/65">This tree predicts: {displayValue(selectedTree.tree_prediction)}{selectedTree.confidence !== null ? ` · Tree confidence: ${confidenceLabel(selectedTree.confidence)}` : ""}</p><ol className="mt-4 space-y-2 text-sm">{selectedTree.decision_path.map((step) => <li key={step.step} className="rounded-2xl bg-white/70 px-3 py-2"><span className="font-medium">{step.step}.</span> {step.display_text}<span className="ml-2 text-black/45">input value: {displayValue(step.input_value)}</span></li>)}</ol>{(selectedTree.hidden_step_count ?? selectedTree.omitted_decision_count) ? <p className="mt-3 text-xs text-black/50">{selectedTree.hidden_step_count ?? selectedTree.omitted_decision_count} additional decisions were made in this tree.</p> : null}<p className="mt-3 text-sm font-medium">{selectedTree.leaf_summary}</p></> : !loadingTreeDetail ? <p className="mt-2 text-sm text-black/60">Select a tree tile to inspect its real decision path.</p> : null}
       </div> : null}
+      {modelExplanation.linear_contributions ? <div className="rounded-3xl border border-black/10 bg-white/60 p-5">
+        <h3 className="font-semibold">Signals behind this prediction</h3>
+        <p className="mt-2 text-sm text-black/60">{modelExplanation.headline}. Intercept/baseline: {displayValue(modelExplanation.linear_contributions.intercept)}</p>
+        <div className="mt-4 grid gap-4 md:grid-cols-2"><div><h4 className="text-sm font-semibold">Strongest positive signals</h4><div className="mt-2 space-y-2">{modelExplanation.linear_contributions.positive.map((item) => <div key={`pos-${item.feature}-${item.contribution}`} className="rounded-xl bg-emerald-500/10 px-3 py-2 text-sm"><span className="font-medium">{item.feature}</span><span className="float-right">{displayValue(item.contribution)}</span></div>)}</div></div><div><h4 className="text-sm font-semibold">Strongest negative signals</h4><div className="mt-2 space-y-2">{modelExplanation.linear_contributions.negative.map((item) => <div key={`neg-${item.feature}-${item.contribution}`} className="rounded-xl bg-red-500/10 px-3 py-2 text-sm"><span className="font-medium">{item.feature}</span><span className="float-right">{displayValue(item.contribution)}</span></div>)}</div></div></div>
+      </div> : null}
+      {modelExplanation.dummy_explanation ? <div className="rounded-3xl border border-black/10 bg-white/60 p-5"><h3 className="font-semibold">Baseline strategy</h3><p className="mt-2 text-sm text-black/65">This baseline model does not make a feature-by-feature decision. It uses the real strategy: {modelExplanation.dummy_explanation.strategy}.</p></div> : null}
       {modelExplanation.features_consulted.length ? <div className="rounded-3xl border border-black/10 bg-white/60 p-5">
         <h3 className="font-semibold">Features consulted for this prediction</h3>
-        <p className="mt-2 text-sm text-black/60">These features appeared in the decision paths the forest used for this one prediction.</p>
+        <p className="mt-2 text-sm text-black/60">These are the features that appeared in the decision paths used by the forest for this specific prediction.</p>
         <div className="mt-4 space-y-3">{modelExplanation.features_consulted.map((feature) => <div key={feature.feature}><div className="flex justify-between text-sm"><span className="font-medium">{feature.feature}</span><span>{feature.trees_used} of {feature.tree_count} trees</span></div><div className="mt-1 h-2 rounded-full bg-black/10"><div className="h-2 rounded-full bg-black" style={{ width: `${Math.round(feature.share_of_trees * 100)}%` }} /></div></div>)}</div>
         <p className="mt-4 text-xs text-black/50">Step 6 showed what mattered across validation data. This view shows which features were consulted for this exact input.</p>
-        <ul className="mt-2 list-disc space-y-1 pl-5 text-xs text-black/50">{modelExplanation.caveats.map((caveat) => <li key={caveat}>{caveat}</li>)}</ul>
       </div> : null}
+      {modelExplanation.caveats.length ? <div className="rounded-3xl border border-amber-200 bg-amber-50 p-5"><h3 className="font-semibold text-amber-900">Caveats</h3><ul className="mt-2 list-disc space-y-1 pl-5 text-sm text-amber-900">{modelExplanation.caveats.map((caveat) => <li key={caveat}>{caveat}</li>)}</ul></div> : null}
     </section>;
   }
 
@@ -509,7 +547,5 @@ export function TestPredictionStep({ pipeId, reviewResultsOutput, onCompleted, o
         </section> : <section className="rounded-3xl border border-black/10 bg-white/60 p-5"><h3 className="font-semibold">Prediction result</h3><p className="mt-2 text-sm text-black/60">Ready to predict. The known target remains hidden until you run the model on an unchanged validation example.</p></section>}
       </aside>
     </div> : explanationContent}
-
-    {result ? <section className="rounded-3xl border border-black/10 bg-white/60 p-6"><h2 className="text-lg font-semibold">Mappable workflow output</h2><p className="mt-2 text-sm text-black/60">These fields are what you will be able to map into workflows later.</p><pre className="mt-4 overflow-x-auto rounded-2xl bg-black p-4 text-xs text-white">{mappableJson}</pre><button type="button" className="mt-5 rounded-full bg-black px-4 py-2 text-sm font-medium text-white">Continue to Publish pipe</button></section> : null}
   </div>;
 }
