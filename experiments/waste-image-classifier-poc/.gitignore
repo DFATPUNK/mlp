@@ -1,0 +1,15 @@
+data/raw/**
+!data/raw/.gitkeep
+data/manifests/**
+!data/manifests/.gitkeep
+data/external_images/images/**
+!data/external_images/images/.gitkeep
+artifacts/**
+!artifacts/.gitkeep
+*.pt
+*.pth
+*.ckpt
+*.log
+__pycache__/
+*.py[cod]
+.ipynb_checkpoints/
