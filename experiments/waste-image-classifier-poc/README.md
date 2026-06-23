@@ -108,3 +108,41 @@ Consider integration only if validation/test performance is credible, calibratio
 ## 14. Limitations
 
 TrashNet is controlled and small compared with real workflow images. The external 20-image set is qualitative, not statistically representative. Confidence is a routing signal, not a factual guarantee. Low-confidence, ambiguous, multi-item, low-light, and blurred inputs should go to human review.
+
+## Phase 0.5 corrective external evaluation
+
+This phase fixes EXIF orientation handling, external policy metrics, device selection, macOS DataLoader defaults, and report overwrite protection without retraining. NumPy is pinned to `numpy>=1.26,<2` because the supported local Torch environment for this POC can fail with NumPy 2. PyTorch and TorchVision should still be installed separately according to the user's CPU, CUDA, MPS, or Colab runtime; this experiment does not pin a CPU-only Torch wheel.
+
+External row output fields are intentionally explicit:
+
+- `known_label_top1_correct`: top-1 prediction correctness for rows with an expected label; blank when no expected label exists.
+- `is_auto_routed`: the calibrated policy routed directly to a material class.
+- `is_needs_review`: the calibrated policy abstained for human review.
+- `auto_route_is_correct`: an auto-routed known-label row was routed to the expected class; blank without an expected label.
+- `is_safe_abstention`: a known-label row was conservatively sent to `needs_review`.
+- `expected_review_correctly_routed`: a row expected to need review was sent to `needs_review`.
+- `is_unsafe_auto_route`: the policy auto-routed to the wrong known class or auto-routed an expected-review image.
+- `policy_outcome_safe`: correct auto-route or conservative review outcome for the row contract.
+
+Preserve the old external evaluation output manually if it exists:
+
+```bash
+RUN="artifacts/runs/poc_frozen_backbone_fine_tune"
+
+mv "$RUN/external_evaluation" \
+  "$RUN/external_evaluation_before_phase_0_5"
+```
+
+Then rerun the same checkpoint and same 20 external images without retraining:
+
+```bash
+python scripts/evaluate_external.py \
+  --checkpoint "$RUN/best_model.pt" \
+  --temperature "$RUN/temperature_scaling.json" \
+  --threshold-policy "$RUN/threshold_policy.json" \
+  --external-manifest data/external_images/external_manifest.csv \
+  --output-dir "$RUN/external_evaluation_exif_fixed" \
+  --device auto
+```
+
+Compare `external_summary.json`, `external_failure_notes.md`, and the two gallery PNGs between the old and new folders. The important comparisons are whether iPhone images now display upright, whether unsafe automatic routes are counted separately from safe abstentions, and whether the selected device appears once per run.

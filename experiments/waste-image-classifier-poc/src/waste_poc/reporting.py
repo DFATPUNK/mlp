@@ -5,8 +5,7 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import numpy as np
 import seaborn as sns
-from PIL import Image
-
+from .images import load_rgb_image
 from .utils import ensure_dir, write_text
 
 
@@ -123,11 +122,19 @@ def save_gallery(rows: list[dict], image_root: str | Path, output_path: str | Pa
         ax = plt.subplot(rows_count, cols, idx)
         image_path = Path(image_root) / row["relative_path"]
         try:
-            ax.imshow(Image.open(image_path).convert("RGB"))
+            ax.imshow(load_rgb_image(image_path))
         except Exception:
             ax.text(0.5, 0.5, "unreadable", ha="center")
         ax.axis("off")
-        ax.set_title(f"{row.get('image_id')}\npred={row.get('predicted_label')} conf={row.get('calibrated_top_confidence')}\nroute={row.get('routing_decision')}", fontsize=8)
+        badge = row.get("gallery_badge") or row.get("policy_badge") or ""
+        ax.set_title(f"{row.get('image_id')}\nexp={row.get('expected_label') or 'unknown'} pred={row.get('predicted_label')}\nconf={row.get('calibrated_top_confidence')} route={row.get('routing_decision')}\n{badge}", fontsize=8)
     plt.tight_layout()
     plt.savefig(output_path, dpi=160)
     plt.close()
+
+
+def dataframe_to_markdown_safe(frame) -> str:
+    try:
+        return frame.to_markdown(index=False)
+    except Exception:
+        return "```csv\n" + frame.to_csv(index=False) + "```"

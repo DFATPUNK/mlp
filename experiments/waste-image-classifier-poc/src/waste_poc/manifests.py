@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Iterable
 
 
+from .images import load_rgb_image
 from .utils import CLASS_NAMES, ensure_dir, sha256_file, write_json
 
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
@@ -39,15 +40,11 @@ def find_trashnet_image_root(source_dir: str | Path, expected_classes: Iterable[
 def validate_image(path: str | Path) -> dict:
     path = Path(path)
     try:
-        from PIL import Image, UnidentifiedImageError
-
-        with Image.open(path) as image:
-            image.verify()
-        with Image.open(path) as image:
-            width, height = image.size
-            fmt = image.format or path.suffix.lstrip(".").upper()
+        image = load_rgb_image(path)
+        width, height = image.size
+        fmt = path.suffix.lstrip(".").upper()
         return {"is_valid_image": True, "width": width, "height": height, "format": fmt, "reason": None}
-    except (UnidentifiedImageError, OSError, ValueError) as exc:
+    except (OSError, ValueError, FileNotFoundError) as exc:
         return {"is_valid_image": False, "width": None, "height": None, "format": None, "reason": str(exc)}
 
 

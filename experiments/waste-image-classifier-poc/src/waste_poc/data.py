@@ -3,8 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pandas as pd
-from PIL import Image
-
+from .images import load_rgb_image
 from .utils import CLASS_NAMES, require_columns
 
 
@@ -25,7 +24,7 @@ class TrashNetManifestDataset:
 
     def __getitem__(self, index: int):
         row = self.frame.iloc[index]
-        image = Image.open(self.image_root / row.relative_path).convert("RGB")
+        image = load_rgb_image(self.image_root / row.relative_path)
         if self.transform:
             image = self.transform(image)
         return image, self.label_to_index[row.label], row.image_id, row.relative_path

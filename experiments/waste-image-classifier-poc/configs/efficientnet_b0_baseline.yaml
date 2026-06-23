@@ -24,7 +24,7 @@ model:
 
 training:
   batch_size: 32
-  num_workers: 2
+  num_workers: auto
   frozen_epochs: 12
   fine_tune_epochs: 8
   early_stopping_patience: 4

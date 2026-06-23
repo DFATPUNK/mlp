@@ -10,10 +10,13 @@ sys.path.insert(0, str(ROOT / "src"))
 
 import pandas as pd
 
-from waste_poc.inference import predict_image
-from waste_poc.reporting import plot_confusion_matrix, save_gallery
-from waste_poc.thresholding import apply_policy
-from waste_poc.utils import CLASS_NAMES, EXTERNAL_ROUTING, EXTERNAL_SCENARIOS, read_json, validate_external_expected_label, write_json, write_text
+from waste_poc.external_io import prepare_external_output_dir
+from waste_poc.external_metrics import enrich_external_row, summarize_external_rows, write_failure_notes
+from waste_poc.images import PREPROCESSING_VERSION
+from waste_poc.inference import ImageInferenceSession
+from waste_poc.reporting import dataframe_to_markdown_safe, plot_confusion_matrix, save_gallery
+from waste_poc.utils import CLASS_NAMES, EXTERNAL_ROUTING, EXTERNAL_SCENARIOS, file_sha256_text, read_json, utc_now_iso, validate_external_expected_label, write_json
+
 
 
 def main() -> int:
@@ -22,8 +25,9 @@ def main() -> int:
     parser.add_argument("--temperature", required=True)
     parser.add_argument("--threshold-policy", required=True)
     parser.add_argument("--external-manifest", default="data/external_images/external_manifest.csv")
-    parser.add_argument("--output-dir", required=True)
-    parser.add_argument("--device", default=None)
+    parser.add_argument("--output-dir", default=None)
+    parser.add_argument("--overwrite", action="store_true")
+    parser.add_argument("--device", default="auto", choices=["auto", "cuda", "mps", "cpu"])
     args = parser.parse_args()
     manifest_path = ROOT / args.external_manifest
     image_root = manifest_path.parent / "images"
@@ -35,10 +39,9 @@ def main() -> int:
     if frame.empty:
         print("External manifest has no image rows yet. Add manually curated challenge images and rerun evaluate_external.py.")
         return 0
-    temperature = read_json(args.temperature)["temperature"]
-    policy = read_json(args.threshold_policy)
-    output_dir = Path(args.output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
+    output_dir = prepare_external_output_dir(args.output_dir, args.checkpoint, args.overwrite)
+    session = ImageInferenceSession.from_files(args.checkpoint, args.temperature, args.threshold_policy, args.device)
+    policy = session.threshold_policy or read_json(args.threshold_policy)
     rows = []
     for row in frame.to_dict("records"):
         validate_external_expected_label(row.get("expected_label"))
@@ -48,35 +51,41 @@ def main() -> int:
             raise ValueError(f"Unsupported expected_routing {row.get('expected_routing')!r}")
         image_path = image_root / row["relative_path"]
         if not image_path.exists():
-            rows.append({**row, "error": "missing image file"})
+            rows.append(enrich_external_row({**row, "error": "missing image file", "recommended_action": "needs_review", "route": "needs_review"}))
             continue
-        result = predict_image(args.checkpoint, image_path, temperature, args.device)
-        routing = apply_policy(result["predicted_label"], result["calibrated_top_confidence"], policy)
-        expected_label = row.get("expected_label") or ""
-        known_correct = (result["predicted_label"] == expected_label) if expected_label else None
-        routing_matches = routing["recommended_action"] == "needs_review" if row["expected_routing"] == "needs_review" else routing["recommended_action"] == "auto_route"
-        rows.append({**row, **result, "threshold": policy.get("selected_threshold"), "routing_decision": routing["route"], "known_in_scope_prediction_correct": known_correct, "routing_decision_matched_expected": routing_matches})
+        result = session.predict(image_path)
+        rows.append(enrich_external_row({**row, **result, "threshold": policy.get("selected_threshold"), "routing_decision": result["route"]}))
     out = pd.DataFrame(rows)
     out.to_csv(output_dir / "external_predictions.csv", index=False)
-    summary = {
-        "external_images_evaluated": int(len(out)),
-        "known_label_accuracy": float(out[out["expected_label"] != ""]["known_in_scope_prediction_correct"].mean()) if (out["expected_label"] != "").any() else None,
-        "routing_match_rate": float(out["routing_decision_matched_expected"].mean()) if "routing_decision_matched_expected" in out else None,
-        "notes": "This 20-image set is a qualitative challenge set, not a statistically representative benchmark.",
-    }
+    summary = summarize_external_rows(rows)
     write_json(output_dir / "external_summary.json", summary)
+    metadata = {
+        "checkpoint_sha256": file_sha256_text(args.checkpoint),
+        "checkpoint_path": str(Path(args.checkpoint)),
+        "temperature_sha256": file_sha256_text(args.temperature),
+        "threshold_policy_sha256": file_sha256_text(args.threshold_policy),
+        "external_manifest_sha256": file_sha256_text(manifest_path),
+        "source_code_preprocessing_version": PREPROCESSING_VERSION,
+        "exif_orientation_applied": True,
+        "selected_device": session.selected_device_name,
+        "timestamp": utc_now_iso(),
+        "run_identifier": Path(args.checkpoint).resolve().parent.name,
+    }
+    write_json(output_dir / "external_evaluation_metadata.json", metadata)
     known = out[out["expected_label"].isin(CLASS_NAMES)]
     if not known.empty:
-        import numpy as np
         from sklearn.metrics import confusion_matrix
 
         matrix = confusion_matrix([CLASS_NAMES.index(x) for x in known["expected_label"]], [CLASS_NAMES.index(x) for x in known["predicted_label"]], labels=list(range(len(CLASS_NAMES))))
         plot_confusion_matrix(matrix, CLASS_NAMES, output_dir / "external_confusion_matrix.png")
-    save_gallery(rows, image_root, output_dir / "external_prediction_gallery.png")
-    save_gallery(rows, image_root, output_dir / "external_routing_gallery.png")
-    failures = out[(out.get("known_in_scope_prediction_correct") == False) | (out.get("routing_decision_matched_expected") == False)]
-    write_text(output_dir / "external_failure_notes.md", failures.to_markdown(index=False) if not failures.empty else "# External failure notes\n\nNo failures recorded in the supplied external set.\n")
+    prediction_rows = [{**row, "gallery_badge": row.get("gallery_badge")} for row in rows]
+    routing_rows = [{**row, "gallery_badge": row.get("policy_badge")} for row in rows]
+    save_gallery(prediction_rows, image_root, output_dir / "external_prediction_gallery.png")
+    save_gallery(routing_rows, image_root, output_dir / "external_routing_gallery.png")
+    definitions = pd.DataFrame([{"field": key, "definition": value} for key, value in summary["field_definitions"].items()])
+    write_failure_notes(output_dir / "external_failure_notes.md", rows, dataframe_to_markdown_safe(definitions))
     print(f"External images evaluated: {len(out)}")
+    print(f"External evaluation outputs: {output_dir}")
     return 0
 
 

@@ -2,18 +2,12 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from .device import resolve_device
 from .utils import CLASS_NAMES
 
 
-def selected_device(requested: str | None = None):
-    import torch
-
-    if requested:
-        device = torch.device(requested)
-    else:
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"Selected device: {device}")
-    return device
+def selected_device(requested: str | None = "auto"):
+    return resolve_device(requested)
 
 
 def create_efficientnet_b0(class_names: list[str] | None = None, pretrained_weights: str = "DEFAULT", mode: str = "frozen_backbone"):

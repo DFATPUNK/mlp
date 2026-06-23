@@ -17,6 +17,7 @@ from tqdm import tqdm
 
 from waste_poc.config import apply_overrides, load_config
 from waste_poc.data import TrashNetManifestDataset, build_transforms, compute_class_weights
+from waste_poc.device import resolve_num_workers
 from waste_poc.model import checkpoint_payload, create_efficientnet_b0, save_checkpoint, selected_device
 from waste_poc.utils import CLASS_NAMES, file_sha256_text, read_json, set_seed, write_json
 
@@ -55,10 +56,12 @@ def train_phase(config: dict, run_dir: Path, mode: str, resume_checkpoint: Path 
     metadata_path = ROOT / "data" / "raw" / "trashnet_source_metadata.json"
     source_metadata = read_json(metadata_path) if metadata_path.exists() else {}
     image_root = ROOT / source_metadata.get("source_directory_detected", "data/raw/trashnet-source")
+    worker_count = resolve_num_workers(config["training"].get("num_workers", "auto"))
+    print(f"DataLoader workers: {worker_count}")
     train_ds = TrashNetManifestDataset(manifest_path, image_root, "train", build_transforms("train", config["dataset"]["image_size"]), class_names)
     val_ds = TrashNetManifestDataset(manifest_path, image_root, "validation", build_transforms("validation", config["dataset"]["image_size"]), class_names)
-    train_loader = DataLoader(train_ds, batch_size=config["training"]["batch_size"], shuffle=True, num_workers=config["training"]["num_workers"])
-    val_loader = DataLoader(val_ds, batch_size=config["training"]["batch_size"], shuffle=False, num_workers=config["training"]["num_workers"])
+    train_loader = DataLoader(train_ds, batch_size=config["training"]["batch_size"], shuffle=True, num_workers=worker_count)
+    val_loader = DataLoader(val_ds, batch_size=config["training"]["batch_size"], shuffle=False, num_workers=worker_count)
     model, _ = create_efficientnet_b0(class_names, config["model"].get("pretrained_weights", "DEFAULT"), mode)
     if resume_checkpoint:
         checkpoint = torch.load(resume_checkpoint, map_location="cpu")
@@ -97,7 +100,7 @@ def main() -> int:
     parser.add_argument("--config", default="configs/efficientnet_b0_baseline.yaml")
     parser.add_argument("--output-dir", default=None)
     parser.add_argument("--seed", type=int, default=None)
-    parser.add_argument("--device", default=None)
+    parser.add_argument("--device", default="auto")
     parser.add_argument("--mode", choices=["frozen_backbone", "fine_tune"], default=None)
     parser.add_argument("--epochs", type=int, default=None)
     parser.add_argument("--batch-size", type=int, default=None)

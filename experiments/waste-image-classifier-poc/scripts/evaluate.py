@@ -15,6 +15,7 @@ from tqdm import tqdm
 
 from waste_poc.calibration import apply_temperature_np, fit_temperature_scaling, softmax_np
 from waste_poc.data import TrashNetManifestDataset, build_transforms
+from waste_poc.device import resolve_num_workers
 from waste_poc.metrics import classification_metrics, save_classification_report, save_metric_json
 from waste_poc.model import build_model_from_checkpoint, load_checkpoint, selected_device
 from waste_poc.reporting import plot_confidence_histogram, plot_confusion_matrix, plot_reliability, write_model_card
@@ -31,7 +32,8 @@ def collect_logits(checkpoint: dict, checkpoint_path: Path, split: str, device_n
     source_metadata = read_json(ROOT / "data" / "raw" / "trashnet_source_metadata.json") if (ROOT / "data" / "raw" / "trashnet_source_metadata.json").exists() else {}
     image_root = ROOT / source_metadata.get("source_directory_detected", "data/raw/trashnet-source")
     dataset = TrashNetManifestDataset(ROOT / checkpoint["config"]["dataset"]["manifest_path"], image_root, split, build_transforms(split, checkpoint.get("image_size", 224)), checkpoint["class_names"])
-    loader = DataLoader(dataset, batch_size=checkpoint["config"]["training"]["batch_size"], shuffle=False, num_workers=checkpoint["config"]["training"]["num_workers"])
+    worker_count = resolve_num_workers(checkpoint["config"]["training"].get("num_workers", "auto"))
+    loader = DataLoader(dataset, batch_size=checkpoint["config"]["training"]["batch_size"], shuffle=False, num_workers=worker_count)
     logits, labels = [], []
     with torch.no_grad():
         for images, target, _, _ in tqdm(loader, leave=False):
@@ -55,7 +57,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Evaluate validation/test splits, calibrate on validation, and select needs_review policy.")
     parser.add_argument("--checkpoint", required=True)
     parser.add_argument("--output-dir", default=None)
-    parser.add_argument("--device", default=None)
+    parser.add_argument("--device", default="auto")
     args = parser.parse_args()
     checkpoint_path = Path(args.checkpoint)
     checkpoint = load_checkpoint(checkpoint_path, map_location="cpu")
