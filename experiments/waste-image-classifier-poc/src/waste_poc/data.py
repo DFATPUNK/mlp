@@ -67,3 +67,12 @@ def compute_class_weights(manifest_path: str | Path, class_names: list[str] | No
     counts = counts.clip(min=1.0)
     weights = counts.sum() / (len(class_names) * counts)
     return torch.tensor(weights, dtype=torch.float32)
+
+
+def build_transform_from_metadata(metadata: dict, split: str):
+    from .clip_candidate import MODEL_FAMILY as CLIP_FAMILY, build_clip_transform
+
+    family = metadata.get("model_family") or metadata.get("architecture") or metadata.get("model", {}).get("family")
+    if family == CLIP_FAMILY:
+        return build_clip_transform(metadata.get("hf_model_id") or metadata.get("model", {}).get("hf_model_id"))
+    return build_transforms(split, metadata.get("image_size") or metadata.get("dataset", {}).get("image_size", 224))

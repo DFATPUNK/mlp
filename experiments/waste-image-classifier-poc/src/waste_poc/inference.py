@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from .calibration import apply_temperature_np, softmax_np
-from .data import build_transforms
+from .data import build_transform_from_metadata
 from .device import mps_operation_error_hint, resolve_device
 from .images import load_rgb_image
 from .model import build_model_from_checkpoint, load_checkpoint
@@ -23,7 +23,7 @@ class ImageInferenceSession:
         self.device = resolve_device(device_name)
         self.model = build_model_from_checkpoint(self.checkpoint).to(self.device)
         self.model.eval()
-        self.transform = build_transforms("test", self.checkpoint.get("image_size", 224))
+        self.transform = build_transform_from_metadata(self.checkpoint, "test")
         self.torch = torch
 
     @classmethod

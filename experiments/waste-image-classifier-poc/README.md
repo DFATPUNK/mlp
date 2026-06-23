@@ -146,3 +146,77 @@ python scripts/evaluate_external.py \
 ```
 
 Compare `external_summary.json`, `external_failure_notes.md`, and the two gallery PNGs between the old and new folders. The important comparisons are whether iPhone images now display upright, whether unsafe automatic routes are counted separately from safe abstentions, and whether the selected device appears once per run.
+
+## Phase 0.6 CLIP frozen-head candidate
+
+Phase 0.6 compares two supervised six-class candidates:
+
+1. EfficientNet-B0 supervised transfer-learning baseline.
+2. `clip_vit_b32_frozen_head`: the `openai/clip-vit-base-patch32` image encoder frozen, with only a trainable linear classification head.
+
+What does not change: the labels remain exactly cardboard, glass, metal, paper, plastic, and trash; `needs_review` remains a routing policy outcome; calibration and threshold selection use validation data only; external images are excluded from training, hyperparameter search, early stopping, calibration, thresholding, and model selection.
+
+### Editable install and validation
+
+From the POC root:
+
+```bash
+python -m pip install -r requirements.txt
+python -m pip install -e .
+python -m compileall src scripts
+python -m unittest discover -s tests -v
+```
+
+### CLIP local smoke-test command
+
+Local CPU or MPS runs are supported for smoke tests and inference, but canonical training is recommended on a GPU runtime such as Colab.
+
+```bash
+python scripts/train.py \
+  --config configs/clip_vit_b32_frozen_head.yaml \
+  --output-dir poc_clip_vit_b32_frozen_head \
+  --mode frozen_backbone \
+  --device auto \
+  --epochs 1
+```
+
+### Canonical CLIP GPU/Colab command
+
+```bash
+!git clone https://github.com/DFATPUNK/mlp.git
+%cd mlp/experiments/waste-image-classifier-poc
+!python -m pip install -r requirements.txt
+!python -m pip install -e .
+!python scripts/run_poc.py \
+  --config configs/clip_vit_b32_frozen_head.yaml \
+  --skip-fine-tune \
+  --run-name poc_clip_vit_b32_frozen_head \
+  --device auto
+```
+
+### Evaluate CLIP on `external_diagnostic_v1`
+
+This external set has already been inspected. Use it only as a diagnostic after the candidate has completed internal validation/test evaluation; do not use it for model selection.
+
+```bash
+RUN="artifacts/runs/poc_clip_vit_b32_frozen_head"
+python scripts/evaluate_external.py \
+  --checkpoint "$RUN/best_model.pt" \
+  --temperature "$RUN/temperature_scaling.json" \
+  --threshold-policy "$RUN/threshold_policy.json" \
+  --external-manifest data/external_images/external_manifest.csv \
+  --output-dir "$RUN/external_diagnostic_v1" \
+  --device auto
+```
+
+### Candidate comparison report
+
+After both candidates have completed validation, untouched test evaluation, and optional diagnostic external evaluation:
+
+```bash
+python scripts/compare_models.py \
+  --efficientnet-run artifacts/runs/poc_frozen_backbone_fine_tune \
+  --clip-run artifacts/runs/poc_clip_vit_b32_frozen_head
+```
+
+The comparison report separates internal validation metrics, untouched internal test metrics, and external diagnostic metrics. A new unseen external set is required before final model selection.

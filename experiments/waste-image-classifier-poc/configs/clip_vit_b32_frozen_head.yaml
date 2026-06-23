@@ -1,0 +1,52 @@
+project_name: waste-image-classifier-poc
+seed: 42
+
+dataset:
+  manifest_path: data/manifests/trashnet_manifest.csv
+  class_names:
+    - cardboard
+    - glass
+    - metal
+    - paper
+    - plastic
+    - trash
+  image_size: 224
+
+split:
+  train: 0.70
+  validation: 0.15
+  test: 0.15
+
+model:
+  family: clip_vit_b32_frozen_head
+  architecture: clip_vit_b32_frozen_head
+  hf_model_id: openai/clip-vit-base-patch32
+  frozen_encoder: true
+  head: linear
+
+training:
+  batch_size: 32
+  num_workers: auto
+  frozen_epochs: 12
+  fine_tune_epochs: 0
+  early_stopping_patience: 4
+  learning_rate_frozen: 0.001
+  learning_rate_fine_tune: 0.0001
+  weight_decay: 0.0001
+  use_class_weights: true
+  hyperparameter_search:
+    learning_rates: [0.001, 0.0003]
+    weight_decays: [0.0, 0.0001]
+
+calibration:
+  enabled: true
+  method: temperature_scaling
+  reliability_bins: 15
+
+routing_policy:
+  target_auto_route_precision: 0.95
+  minimum_auto_route_coverage: 0.10
+  threshold_candidates: 101
+
+reporting:
+  top_external_gallery_images: 20
