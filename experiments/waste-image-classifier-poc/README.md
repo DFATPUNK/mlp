@@ -177,12 +177,15 @@ python -m unittest discover -s tests -v
 
 ### CLIP local smoke-test command
 
-Local CPU or MPS runs are supported for smoke tests and inference, but canonical training is recommended on a GPU runtime such as Colab.
+Local CPU or MPS runs are supported for smoke tests and inference, but canonical training is recommended on a GPU runtime such as Colab. This smoke test may download or reuse cached CLIP weights, writes a disposable run under `artifacts/runs/`, and does not validate model quality.
 
 ```bash
+STAMP="$(date +%Y%m%d_%H%M%S)"
+OUT="artifacts/runs/poc_clip_vit_b32_frozen_head_smoke_$STAMP"
+
 python scripts/train.py \
   --config configs/clip_vit_b32_frozen_head.yaml \
-  --output-dir poc_clip_vit_b32_frozen_head \
+  --output-dir "$OUT" \
   --mode frozen_backbone \
   --device auto \
   --epochs 1
