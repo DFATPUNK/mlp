@@ -1,0 +1,12 @@
+numpy>=1.26,<2
+pandas
+Pillow
+PyYAML
+scikit-learn
+matplotlib
+seaborn
+tqdm
+torch
+torchvision
+tabulate>=0.9,<1
+transformers>=4.41,<5
