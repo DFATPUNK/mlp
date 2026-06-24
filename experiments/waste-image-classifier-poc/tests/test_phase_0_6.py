@@ -9,7 +9,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-from waste_poc.clip_candidate import MODEL_FAMILY as CLIP_FAMILY, build_clip_frozen_head, trainable_parameter_names
+from waste_poc.clip_candidate import MODEL_FAMILY as CLIP_FAMILY, build_clip_frozen_head, load_clip_vision_model, trainable_parameter_names
 from waste_poc.model import EFFICIENTNET_FAMILY, build_model_from_checkpoint
 from waste_poc.model_selection import select_best_candidate_by_validation_metric
 from waste_poc.utils import read_json, write_json
@@ -39,6 +39,16 @@ class Phase06Tests(unittest.TestCase):
     def test_editable_install_imports_package(self):
         module = importlib.import_module("waste_poc")
         self.assertTrue(Path(module.__file__).as_posix().endswith("waste_poc/__init__.py"))
+
+    def test_default_clip_loader_requests_safetensors(self):
+        from_pretrained = mock.Mock(return_value=object())
+        fake_transformers = SimpleNamespace(CLIPVisionModel=SimpleNamespace(from_pretrained=from_pretrained))
+
+        with mock.patch.dict(sys.modules, {"transformers": fake_transformers}):
+            loaded = load_clip_vision_model("fake-clip")
+
+        self.assertIs(loaded, from_pretrained.return_value)
+        from_pretrained.assert_called_once_with("fake-clip", use_safetensors=True)
 
     def test_clip_encoder_is_frozen_and_only_head_receives_gradients(self):
         try:
