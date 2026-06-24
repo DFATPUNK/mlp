@@ -54,6 +54,10 @@ class ExternalEvaluationSessionTests(unittest.TestCase):
         from pathlib import Path
         from unittest import mock
 
+        try:
+            import pandas  # noqa: F401
+        except Exception:
+            self.skipTest("pandas is required for evaluate_external integration test")
         from scripts import evaluate_external
 
         class FakeSession:

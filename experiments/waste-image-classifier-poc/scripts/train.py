@@ -13,9 +13,9 @@ sys.path.insert(0, str(ROOT / "src"))
 
 
 from waste_poc.config import apply_overrides, load_config
-from waste_poc.data import TrashNetManifestDataset, build_transform_from_metadata, compute_class_weights
 from waste_poc.device import resolve_num_workers
 from waste_poc.model import checkpoint_payload, create_model_from_config, metadata_from_checkpoint_payload, save_checkpoint, selected_device
+from waste_poc.training_selection import select_best_candidate_from_summaries
 from waste_poc.utils import CLASS_NAMES, file_sha256_text, read_json, set_seed, write_json
 
 
@@ -48,6 +48,7 @@ def run_epoch(model, loader, criterion, optimizer, device, use_amp: bool, traini
 def train_phase(config: dict, run_dir: Path, mode: str, resume_checkpoint: Path | None = None, selected_hyperparameters: dict | None = None) -> Path:
     import torch
     from torch.utils.data import DataLoader
+    from waste_poc.data import TrashNetManifestDataset, build_transform_from_metadata, compute_class_weights
 
     device = selected_device(config.get("device"))
     use_amp = device.type == "cuda"
@@ -88,6 +89,7 @@ def train_phase(config: dict, run_dir: Path, mode: str, resume_checkpoint: Path 
             best_f1 = val_metrics["macro_f1"]
             stale_epochs = 0
             save_checkpoint(best_path, payload)
+            write_json(run_dir / "best_metrics.json", metrics)
             write_json(run_dir / "model_metadata.json", metadata_from_checkpoint_payload(payload, file_sha256_text(best_path)))
         else:
             stale_epochs += 1
@@ -129,16 +131,16 @@ def main() -> int:
                 candidate_dir = run_dir / f"lr_{lr}_wd_{wd}"
                 candidate_dir.mkdir(parents=True, exist_ok=True)
                 candidate_best = train_phase(config, candidate_dir, mode, Path(args.resume_checkpoint) if args.resume_checkpoint else None, hp)
-                metrics = read_json(candidate_dir / "latest_metrics.json")
+                metrics = read_json(candidate_dir / "best_metrics.json")
                 score = metrics.get("validation", {}).get("macro_f1", -1.0)
-                results.append({"hyperparameters": hp, "validation_macro_f1": score, "checkpoint": str(candidate_best)})
-                if score > best_score:
-                    best_score = score
-                    best_candidate = candidate_dir
-        if best_candidate is not None:
+                results.append({"selected_hyperparameters": hp, "best_validation_macro_f1": score, "best_epoch": metrics.get("epoch"), "checkpoint_path": str(candidate_best), "candidate_dir": str(candidate_dir)})
+        selected = select_best_candidate_from_summaries(results)
+        if selected is not None:
+            best_score = selected["best_validation_macro_f1"]
+            best_candidate = Path(selected["candidate_dir"])
             shutil.copy2(best_candidate / "best_model.pt", run_dir / "best_model.pt")
             shutil.copy2(best_candidate / "model_metadata.json", run_dir / "model_metadata.json")
-        write_json(run_dir / "training_summary.json", {"selection_split": "validation", "candidates": results, "selected_validation_macro_f1": best_score})
+        write_json(run_dir / "training_summary.json", {"selection_split": "validation", "candidates": results, "selected_candidate": selected, "selected_validation_macro_f1": best_score})
         print(f"Best validation candidate copied to: {run_dir / 'best_model.pt'}")
     else:
         best = train_phase(config, run_dir, mode, Path(args.resume_checkpoint) if args.resume_checkpoint else None)

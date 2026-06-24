@@ -48,5 +48,31 @@ class ClipCandidateTests(unittest.TestCase):
             build_model_from_checkpoint({"model_family": "unknown_family", "class_names": ["trash"], "model_state_dict": {}})
 
 
+class ClipHyperparameterSelectionTests(unittest.TestCase):
+    def test_selects_candidate_by_best_validation_not_latest(self):
+        from waste_poc.training_selection import select_best_candidate_from_summaries
+
+        selected = select_best_candidate_from_summaries(
+            [
+                {
+                    "selected_hyperparameters": {"learning_rate": 0.001},
+                    "best_validation_macro_f1": 0.91,
+                    "best_epoch": 2,
+                    "latest_validation_macro_f1": 0.40,
+                    "checkpoint_path": "candidate_a/best_model.pt",
+                },
+                {
+                    "selected_hyperparameters": {"learning_rate": 0.0003},
+                    "best_validation_macro_f1": 0.88,
+                    "best_epoch": 5,
+                    "latest_validation_macro_f1": 0.87,
+                    "checkpoint_path": "candidate_b/best_model.pt",
+                },
+            ]
+        )
+        self.assertEqual(selected["checkpoint_path"], "candidate_a/best_model.pt")
+        self.assertEqual(selected["best_epoch"], 2)
+
+
 if __name__ == "__main__":
     unittest.main()

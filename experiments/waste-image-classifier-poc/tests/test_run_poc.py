@@ -1,6 +1,6 @@
 import unittest
 
-from scripts.run_poc import build_pipeline_commands, should_run_fine_tune
+from waste_poc.orchestration import build_pipeline_commands, should_run_fine_tune
 
 
 class RunPocTests(unittest.TestCase):

@@ -189,7 +189,6 @@ python scripts/train.py \
 !python -m pip install -e .
 !python scripts/run_poc.py \
   --config configs/clip_vit_b32_frozen_head.yaml \
-  --skip-fine-tune \
   --run-name poc_clip_vit_b32_frozen_head \
   --device auto
 ```
@@ -216,7 +215,16 @@ After both candidates have completed validation, untouched test evaluation, and 
 ```bash
 python scripts/compare_models.py \
   --efficientnet-run artifacts/runs/poc_frozen_backbone_fine_tune \
-  --clip-run artifacts/runs/poc_clip_vit_b32_frozen_head
+  --clip-run artifacts/runs/poc_clip_vit_b32_frozen_head \
+  --efficientnet-external-dir artifacts/runs/poc_frozen_backbone_fine_tune/external_diagnostic_v1 \
+  --clip-external-dir artifacts/runs/poc_clip_vit_b32_frozen_head/external_diagnostic_v1
 ```
 
 The comparison report separates internal validation metrics, untouched internal test metrics, and external diagnostic metrics. A new unseen external set is required before final model selection.
+
+
+### Requirements safety
+
+`requirements.txt` intentionally does not install Torch or TorchVision. Install a compatible Torch/TorchVision pair separately using the official platform instructions for your CPU, CUDA, MPS, or Colab runtime before installing the POC requirements. This prevents `pip install -r requirements.txt` from replacing an existing working accelerator-specific Torch installation.
+
+External diagnostic evaluation is opt-in. `run_poc.py` runs internal training/evaluation by default and does not touch `external_diagnostic_v1` unless `--include-external` is explicitly provided. Run external diagnostics manually after internal validation/test artifacts exist.

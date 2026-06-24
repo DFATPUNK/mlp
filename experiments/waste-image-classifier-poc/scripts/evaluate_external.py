@@ -8,16 +8,49 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-import pandas as pd
+prepare_external_output_dir = None
+enrich_external_row = summarize_external_rows = write_failure_notes = None
+PREPROCESSING_VERSION = None
+ImageInferenceSession = None
+dataframe_to_markdown_safe = plot_confusion_matrix = save_gallery = None
+CLASS_NAMES = EXTERNAL_ROUTING = EXTERNAL_SCENARIOS = None
+file_sha256_text = read_json = utc_now_iso = validate_external_expected_label = write_json = None
 
-from waste_poc.external_io import prepare_external_output_dir
-from waste_poc.external_metrics import enrich_external_row, summarize_external_rows, write_failure_notes
-from waste_poc.images import PREPROCESSING_VERSION
-from waste_poc.inference import ImageInferenceSession
-from waste_poc.reporting import dataframe_to_markdown_safe, plot_confusion_matrix, save_gallery
-from waste_poc.utils import CLASS_NAMES, EXTERNAL_ROUTING, EXTERNAL_SCENARIOS, file_sha256_text, read_json, utc_now_iso, validate_external_expected_label, write_json
 
 
+def _ensure_runtime_imports():
+    global prepare_external_output_dir, enrich_external_row, summarize_external_rows, write_failure_notes
+    global PREPROCESSING_VERSION, ImageInferenceSession, dataframe_to_markdown_safe, plot_confusion_matrix, save_gallery
+    global CLASS_NAMES, EXTERNAL_ROUTING, EXTERNAL_SCENARIOS, file_sha256_text, read_json, utc_now_iso, validate_external_expected_label, write_json
+    if prepare_external_output_dir is None:
+        from waste_poc.external_io import prepare_external_output_dir as _prepare_external_output_dir
+        prepare_external_output_dir = _prepare_external_output_dir
+    if enrich_external_row is None:
+        from waste_poc.external_metrics import enrich_external_row as _enrich_external_row, summarize_external_rows as _summarize_external_rows, write_failure_notes as _write_failure_notes
+        enrich_external_row = _enrich_external_row
+        summarize_external_rows = _summarize_external_rows
+        write_failure_notes = _write_failure_notes
+    if PREPROCESSING_VERSION is None:
+        from waste_poc.images import PREPROCESSING_VERSION as _PREPROCESSING_VERSION
+        PREPROCESSING_VERSION = _PREPROCESSING_VERSION
+    if ImageInferenceSession is None:
+        from waste_poc.inference import ImageInferenceSession as _ImageInferenceSession
+        ImageInferenceSession = _ImageInferenceSession
+    if dataframe_to_markdown_safe is None:
+        from waste_poc.reporting import dataframe_to_markdown_safe as _dataframe_to_markdown_safe, plot_confusion_matrix as _plot_confusion_matrix, save_gallery as _save_gallery
+        dataframe_to_markdown_safe = _dataframe_to_markdown_safe
+        plot_confusion_matrix = _plot_confusion_matrix
+        save_gallery = _save_gallery
+    if CLASS_NAMES is None:
+        from waste_poc.utils import CLASS_NAMES as _CLASS_NAMES, EXTERNAL_ROUTING as _EXTERNAL_ROUTING, EXTERNAL_SCENARIOS as _EXTERNAL_SCENARIOS, file_sha256_text as _file_sha256_text, read_json as _read_json, utc_now_iso as _utc_now_iso, validate_external_expected_label as _validate_external_expected_label, write_json as _write_json
+        CLASS_NAMES = _CLASS_NAMES
+        EXTERNAL_ROUTING = _EXTERNAL_ROUTING
+        EXTERNAL_SCENARIOS = _EXTERNAL_SCENARIOS
+        file_sha256_text = _file_sha256_text
+        read_json = _read_json
+        utc_now_iso = _utc_now_iso
+        validate_external_expected_label = _validate_external_expected_label
+        write_json = _write_json
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Evaluate manually supplied external challenge images.")
@@ -29,6 +62,9 @@ def main() -> int:
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument("--device", default="auto", choices=["auto", "cuda", "mps", "cpu"])
     args = parser.parse_args()
+    import pandas as pd
+    _ensure_runtime_imports()
+
     manifest_path = ROOT / args.external_manifest
     image_root = manifest_path.parent / "images"
     if not manifest_path.exists() or not image_root.exists():
