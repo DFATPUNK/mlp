@@ -1,14 +1,14 @@
 # Waste Image Classifier POC
 
-This isolated experiment tests whether a pretrained EfficientNet-B0 can classify single-primary-item waste photos into the six TrashNet classes and whether calibrated confidence can support an honest `needs_review` routing policy.
+This isolated experiment tests whether supervised image candidates can classify single-primary-item waste photos into the six TrashNet classes and whether calibrated confidence can support an honest `needs_review` routing policy.
 
 ## 1. What this POC proves
 
-- Trains a real TorchVision EfficientNet-B0 transfer-learning model on TrashNet.
+- Trains real supervised candidates on TrashNet: an EfficientNet-B0 transfer-learning baseline and a frozen CLIP image encoder with a linear six-class head.
 - Evaluates validation and untouched test performance from a deterministic manifest.
 - Fits temperature scaling on validation logits only.
 - Selects a `needs_review` threshold from validation data only.
-- Supports a manually curated 20-image qualitative external challenge set.
+- Supports a manually curated 20-image qualitative external diagnostic set named `external_diagnostic_v1`.
 
 ## 2. What it does not prove
 
@@ -20,7 +20,7 @@ This isolated experiment tests whether a pretrained EfficientNet-B0 can classify
 ## 3. Directory structure
 
 ```txt
-configs/                         EfficientNet-B0 baseline YAML
+configs/                         Candidate YAML files
 scripts/                         Download, manifest, train, evaluate, predict, orchestrate
 src/waste_poc/                   Reusable experiment code
 tests/                           Focused unit tests
@@ -44,8 +44,9 @@ Use a GPU runtime when available. Colab usually includes PyTorch and TorchVision
 ```bash
 !git clone https://github.com/DFATPUNK/mlp.git
 %cd mlp
-!pip install numpy pandas Pillow PyYAML scikit-learn matplotlib seaborn tqdm
 %cd experiments/waste-image-classifier-poc
+!python -m pip install -r requirements.txt
+!python -m pip install -e .
 !python scripts/run_poc.py --config configs/efficientnet_b0_baseline.yaml
 ```
 
@@ -53,14 +54,17 @@ If Colab does not include a compatible Torch/TorchVision pair, install one using
 
 ## 6. Local setup
 
-Install a compatible Torch and TorchVision pair through the official PyTorch installation instructions for your CPU/GPU platform. Then install the experiment dependencies:
+Install a compatible Torch and TorchVision pair through the official PyTorch installation instructions for your CPU/GPU platform. Torch and TorchVision are intentionally not listed in `requirements.txt` because CPU, CUDA, MPS, Colab, and cloud runtimes need platform-specific wheels. Then install and validate the experiment package:
 
 ```bash
 cd experiments/waste-image-classifier-poc
 python -m pip install -r requirements.txt
+python -m pip install -e .
+python -m compileall src scripts
+python -m unittest discover -s tests -v
 ```
 
-Training can run on CPU but will be slower. The code prints the selected device and uses mixed precision only when CUDA is available.
+Local CPU or MPS is suitable for smoke tests and inference. Canonical training is recommended on a GPU environment such as Colab. The code prints the selected device and uses mixed precision only when CUDA is available.
 
 ## 7. Reproducible commands
 
@@ -77,7 +81,9 @@ One-command orchestration:
 python scripts/run_poc.py --config configs/efficientnet_b0_baseline.yaml
 ```
 
-Optional flags: `--skip-download`, `--skip-manifest`, `--skip-fine-tune`, `--skip-external`, and `--run-name <name>`.
+Optional flags: `--skip-download`, `--skip-manifest`, `--skip-fine-tune`, `--include-external`, `--run-name <name>`, and `--device auto|cuda|mps|cpu`.
+
+`run_poc.py` does not evaluate external images by default. Run `external_diagnostic_v1` manually after internal artifacts exist, or pass `--include-external` when you intentionally want the diagnostic step included.
 
 ## 8. Frozen-backbone baseline
 
@@ -93,13 +99,13 @@ Fine-tuning starts from the best frozen-backbone checkpoint, unfreezes only the 
 
 The test split is evaluated only after calibration and threshold selection are frozen.
 
-## 11. Adding the 20 external images
+## 11. Adding the 20 external diagnostic images
 
 Add images manually to `data/external_images/images/` and fill `data/external_images/external_manifest.csv`. Follow `docs/EXTERNAL_IMAGES_CHECKLIST.md`. The scripts do not download external images from Google Images, random websites, or copyright-unclear sources.
 
 ## 12. How to read the reports
 
-A completed run writes metrics, confusion matrices, calibration plots, threshold policy, test-policy report, external challenge outputs, and a generated `model_card.md` under `artifacts/runs/<run>/`.
+A completed internal run writes metrics, confusion matrices, calibration plots, threshold policy, test-policy report, and a generated `model_card.md` under `artifacts/runs/<run>/`. External diagnostic outputs are written only when `evaluate_external.py` is called explicitly or `run_poc.py --include-external` is used.
 
 ## 13. Criteria for moving to an MLP image-pipe implementation
 
@@ -141,7 +147,7 @@ python scripts/evaluate_external.py \
   --temperature "$RUN/temperature_scaling.json" \
   --threshold-policy "$RUN/threshold_policy.json" \
   --external-manifest data/external_images/external_manifest.csv \
-  --output-dir "$RUN/external_evaluation_exif_fixed" \
+  --output-dir "$RUN/external_diagnostic_v1" \
   --device auto
 ```
 
@@ -189,7 +195,6 @@ python scripts/train.py \
 !python -m pip install -e .
 !python scripts/run_poc.py \
   --config configs/clip_vit_b32_frozen_head.yaml \
-  --skip-fine-tune \
   --run-name poc_clip_vit_b32_frozen_head \
   --device auto
 ```
@@ -216,7 +221,9 @@ After both candidates have completed validation, untouched test evaluation, and 
 ```bash
 python scripts/compare_models.py \
   --efficientnet-run artifacts/runs/poc_frozen_backbone_fine_tune \
-  --clip-run artifacts/runs/poc_clip_vit_b32_frozen_head
+  --clip-run artifacts/runs/poc_clip_vit_b32_frozen_head \
+  --efficientnet-external-dir artifacts/runs/poc_frozen_backbone_fine_tune/external_diagnostic_v1 \
+  --clip-external-dir artifacts/runs/poc_clip_vit_b32_frozen_head/external_diagnostic_v1
 ```
 
 The comparison report separates internal validation metrics, untouched internal test metrics, and external diagnostic metrics. A new unseen external set is required before final model selection.

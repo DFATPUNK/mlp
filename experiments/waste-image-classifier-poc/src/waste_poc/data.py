@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pandas as pd
+
 from .images import load_rgb_image
 from .utils import CLASS_NAMES, require_columns
 
@@ -74,5 +75,5 @@ def build_transform_from_metadata(metadata: dict, split: str):
 
     family = metadata.get("model_family") or metadata.get("architecture") or metadata.get("model", {}).get("family")
     if family == CLIP_FAMILY:
-        return build_clip_transform(metadata.get("hf_model_id") or metadata.get("model", {}).get("hf_model_id"))
+        return build_clip_transform(metadata.get("hf_model_id") or metadata.get("huggingface_model_id") or metadata.get("model", {}).get("hf_model_id"))
     return build_transforms(split, metadata.get("image_size") or metadata.get("dataset", {}).get("image_size", 224))

@@ -1,10 +1,12 @@
 [build-system]
-requires = []
-build-backend = "build_backend"
-backend-path = ["."]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
 
 [project]
 name = "waste-image-classifier-poc"
 version = "0.6.0"
 description = "Isolated TrashNet waste image classifier proof of concept"
 requires-python = ">=3.10"
+
+[tool.setuptools.packages.find]
+where = ["src"]

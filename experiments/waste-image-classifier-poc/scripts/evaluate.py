@@ -3,14 +3,11 @@ from __future__ import annotations
 
 import argparse
 import json
-import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "src"))
 
 import numpy as np
-from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from waste_poc.calibration import apply_temperature_np, fit_temperature_scaling, softmax_np
@@ -25,6 +22,7 @@ from waste_poc.utils import read_json, write_json
 
 def collect_logits(checkpoint: dict, checkpoint_path: Path, split: str, device_name: str | None = None):
     import torch
+    from torch.utils.data import DataLoader
 
     device = selected_device(device_name)
     model = build_model_from_checkpoint(checkpoint).to(device)
@@ -89,6 +87,8 @@ def main() -> int:
             "class_names": class_names,
             "repository_url": "https://github.com/garythung/trashnet.git",
             "source_commit": checkpoint.get("source_commit"),
+            "model_family": checkpoint.get("model_family") or checkpoint.get("architecture"),
+            "head_architecture": checkpoint.get("head_architecture"),
             "training_mode": checkpoint.get("training_mode"),
             "training_config_json": json.dumps(checkpoint.get("config", {}), indent=2),
             "validation_metrics_json": json.dumps(val_metrics, indent=2),

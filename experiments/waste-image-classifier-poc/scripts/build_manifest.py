@@ -2,11 +2,9 @@
 from __future__ import annotations
 
 import argparse
-import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "src"))
 
 from waste_poc.config import load_config
 from waste_poc.manifests import assign_grouped_stratified_splits, collect_image_rows, find_trashnet_image_root, write_manifest_outputs
@@ -26,8 +24,9 @@ def main() -> int:
     image_root = ROOT / args.image_root if args.image_root else ROOT / metadata["source_directory_detected"]
     if not image_root.exists():
         image_root = find_trashnet_image_root(ROOT / "data" / "raw" / "trashnet-source")
-    split = config.get("split", {"train": 0.70, "validation": 0.15, "test": 0.15})
-    seed = args.seed if args.seed is not None else config.get("seed", 42)
+    split_cfg = config.get("split", {"train": 0.70, "validation": 0.15, "test": 0.15})
+    split = {key: split_cfg[key] for key in ["train", "validation", "test"]}
+    seed = args.seed if args.seed is not None else split_cfg.get("seed", config.get("seed", 42))
     valid_rows, invalid_rows = collect_image_rows(image_root, metadata["resolved_commit_sha"], CLASS_NAMES)
     assigned = assign_grouped_stratified_splits(valid_rows, split, seed=seed)
     write_manifest_outputs(assigned, invalid_rows, metadata, ROOT / args.output_dir)

@@ -4,11 +4,9 @@ from __future__ import annotations
 import argparse
 import shutil
 import subprocess
-import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "src"))
 
 from waste_poc.manifests import find_trashnet_image_root
 from waste_poc.utils import CLASS_NAMES, utc_now_iso, write_json

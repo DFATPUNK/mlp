@@ -13,6 +13,7 @@ dataset:
   image_size: 224
 
 split:
+  seed: 42
   train: 0.70
   validation: 0.15
   test: 0.15

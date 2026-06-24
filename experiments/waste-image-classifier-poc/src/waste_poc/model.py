@@ -56,21 +56,26 @@ def checkpoint_payload(model, optimizer, *, epoch: int, config: dict, class_name
     base_metadata = clip_metadata(config, selected_hyperparameters) if family == CLIP_FAMILY else {
         "model_family": EFFICIENTNET_FAMILY,
         "hf_model_id": None,
+        "huggingface_model_id": None,
         "frozen_encoder": training_mode == "frozen_backbone",
         "head_architecture": "torchvision_efficientnet_classifier",
         "preprocessing_identifier": "torchvision EfficientNet_B0_Weights.DEFAULT",
         "training_code_version": "efficientnet_b0_transfer_v1",
         "selected_hyperparameters": selected_hyperparameters or {},
     }
+    validation_macro_f1 = metrics.get("validation", {}).get("macro_f1")
     return {
         "architecture": base_metadata["model_family"],
         "model_family": base_metadata["model_family"],
         "hf_model_id": base_metadata["hf_model_id"],
+        "huggingface_model_id": base_metadata.get("huggingface_model_id", base_metadata["hf_model_id"]),
+        "frozen_encoder": base_metadata["frozen_encoder"],
         "head_architecture": base_metadata["head_architecture"],
         "preprocessing_identifier": base_metadata["preprocessing_identifier"],
         "training_code_version": base_metadata["training_code_version"],
         "selected_hyperparameters": base_metadata["selected_hyperparameters"],
         "device_used_for_training": device_used,
+        "training_device": device_used,
         "timestamp": utc_now_iso(),
         "number_of_classes": len(class_names),
         "class_names": class_names,
@@ -88,6 +93,8 @@ def checkpoint_payload(model, optimizer, *, epoch: int, config: dict, class_name
         "run_id": run_id,
         "training_mode": training_mode,
         "metrics": metrics,
+        "best_epoch": epoch,
+        "best_validation_macro_f1": validation_macro_f1,
     }
 
 
@@ -95,11 +102,14 @@ def metadata_from_checkpoint_payload(payload: dict, checkpoint_sha256: str | Non
     keys = [
         "model_family",
         "hf_model_id",
+        "huggingface_model_id",
+        "frozen_encoder",
         "head_architecture",
         "preprocessing_identifier",
         "training_code_version",
         "selected_hyperparameters",
         "device_used_for_training",
+        "training_device",
         "timestamp",
         "class_names",
         "label_to_index",
@@ -110,6 +120,9 @@ def metadata_from_checkpoint_payload(payload: dict, checkpoint_sha256: str | Non
         "run_id",
         "training_mode",
         "metrics",
+        "best_epoch",
+        "best_validation_macro_f1",
+        "checkpoint_path",
     ]
     metadata = {key: payload.get(key) for key in keys}
     metadata["checkpoint_sha256"] = checkpoint_sha256
@@ -131,8 +144,14 @@ def load_checkpoint(path: str | Path, map_location="cpu") -> dict:
 
 def build_model_from_checkpoint(checkpoint: dict):
     family = checkpoint.get("model_family") or checkpoint.get("architecture", EFFICIENTNET_FAMILY)
+    state_dict = checkpoint.get("model_state_dict", {})
+    state_keys = set(state_dict)
+    if family == CLIP_FAMILY and any(key.startswith("features.") for key in state_keys):
+        raise ValueError("Checkpoint declares CLIP frozen-head but its state dict looks like EfficientNet-B0; refusing unsafe load.")
+    if family in {EFFICIENTNET_FAMILY, "efficientnet_b0"} and any(key.startswith("vision_model.") for key in state_keys):
+        raise ValueError("Checkpoint declares EfficientNet-B0 but its state dict looks like CLIP; refusing unsafe load.")
     if family == CLIP_FAMILY:
-        model = build_clip_frozen_head(len(checkpoint["class_names"]), checkpoint.get("hf_model_id"))
+        model = build_clip_frozen_head(len(checkpoint["class_names"]), checkpoint.get("hf_model_id") or checkpoint.get("huggingface_model_id"))
     elif family in {EFFICIENTNET_FAMILY, "efficientnet_b0"}:
         model, _ = create_efficientnet_b0(checkpoint["class_names"], pretrained_weights="NONE", mode="fine_tune")
     else:

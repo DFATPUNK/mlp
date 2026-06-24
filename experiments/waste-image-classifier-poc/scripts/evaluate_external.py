@@ -2,11 +2,9 @@
 from __future__ import annotations
 
 import argparse
-import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "src"))
 
 import pandas as pd
 
@@ -43,6 +41,7 @@ def main() -> int:
     session = ImageInferenceSession.from_files(args.checkpoint, args.temperature, args.threshold_policy, args.device)
     policy = session.threshold_policy or read_json(args.threshold_policy)
     rows = []
+    image_hashes = {}
     for row in frame.to_dict("records"):
         validate_external_expected_label(row.get("expected_label"))
         if row.get("scenario") not in EXTERNAL_SCENARIOS:
@@ -51,10 +50,11 @@ def main() -> int:
             raise ValueError(f"Unsupported expected_routing {row.get('expected_routing')!r}")
         image_path = image_root / row["relative_path"]
         if not image_path.exists():
-            rows.append(enrich_external_row({**row, "error": "missing image file", "recommended_action": "needs_review", "route": "needs_review"}))
+            rows.append(enrich_external_row({**row, "error": "missing image file", "image_sha256": None, "exif_orientation_applied": True, "preprocessing_version": PREPROCESSING_VERSION, "recommended_action": "needs_review", "route": "needs_review"}))
             continue
+        image_hashes[row["relative_path"]] = file_sha256_text(image_path)
         result = session.predict(image_path)
-        rows.append(enrich_external_row({**row, **result, "threshold": policy.get("selected_threshold"), "routing_decision": result["route"]}))
+        rows.append(enrich_external_row({**row, **result, "image_sha256": image_hashes[row["relative_path"]], "exif_orientation_applied": True, "preprocessing_version": PREPROCESSING_VERSION, "threshold": policy.get("selected_threshold"), "routing_decision": result["route"]}))
     out = pd.DataFrame(rows)
     out.to_csv(output_dir / "external_predictions.csv", index=False)
     summary = summarize_external_rows(rows)
@@ -65,6 +65,8 @@ def main() -> int:
         "temperature_sha256": file_sha256_text(args.temperature),
         "threshold_policy_sha256": file_sha256_text(args.threshold_policy),
         "external_manifest_sha256": file_sha256_text(manifest_path),
+        "external_set_name": "external_diagnostic_v1",
+        "image_sha256": image_hashes,
         "source_code_preprocessing_version": PREPROCESSING_VERSION,
         "exif_orientation_applied": True,
         "selected_device": session.selected_device_name,

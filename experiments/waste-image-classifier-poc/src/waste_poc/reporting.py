@@ -2,14 +2,15 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import matplotlib.pyplot as plt
-import numpy as np
-import seaborn as sns
 from .images import load_rgb_image
 from .utils import ensure_dir, write_text
 
 
 def plot_confusion_matrix(matrix, class_names: list[str], output_path: str | Path, normalized: bool = False) -> None:
+    import matplotlib.pyplot as plt
+    import numpy as np
+    import seaborn as sns
+
     ensure_dir(Path(output_path).parent)
     plt.figure(figsize=(8, 6))
     sns.heatmap(np.asarray(matrix), annot=True, fmt=".2f" if normalized else "d", xticklabels=class_names, yticklabels=class_names, cmap="Blues")
@@ -22,6 +23,8 @@ def plot_confusion_matrix(matrix, class_names: list[str], output_path: str | Pat
 
 
 def plot_confidence_histogram(confidences, output_path: str | Path) -> None:
+    import matplotlib.pyplot as plt
+
     ensure_dir(Path(output_path).parent)
     plt.figure(figsize=(7, 4))
     plt.hist(confidences, bins=20, range=(0, 1), color="#2563eb", alpha=0.85)
@@ -34,6 +37,9 @@ def plot_confidence_histogram(confidences, output_path: str | Path) -> None:
 
 
 def plot_reliability(confidences, correctness, output_path: str | Path, bins: int = 15, title: str = "Reliability diagram") -> None:
+    import matplotlib.pyplot as plt
+    import numpy as np
+
     ensure_dir(Path(output_path).parent)
     confidences = np.asarray(confidences)
     correctness = np.asarray(correctness)
@@ -74,7 +80,7 @@ TrashNet from `{context.get('repository_url', 'unknown')}` at commit `{context.g
 Deterministic stratified 70/15/15 manifest split with exact duplicate SHA256 groups kept in one split.
 
 ## Model architecture
-EfficientNet-B0 transfer learning, mode: `{context.get('training_mode', 'unknown')}`.
+Family: `{context.get('model_family', 'unknown')}`. Head: `{context.get('head_architecture', 'unknown')}`. Training mode: `{context.get('training_mode', 'unknown')}`.
 
 ## Training configuration
 ```json
@@ -111,6 +117,9 @@ This proof of concept requires human review for uncertain predictions and should
 
 
 def save_gallery(rows: list[dict], image_root: str | Path, output_path: str | Path, limit: int = 20) -> None:
+    import matplotlib.pyplot as plt
+    import numpy as np
+
     ensure_dir(Path(output_path).parent)
     rows = rows[:limit]
     if not rows:
