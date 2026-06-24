@@ -160,6 +160,8 @@ Phase 0.6 compares two supervised six-class candidates:
 1. EfficientNet-B0 supervised transfer-learning baseline.
 2. `clip_vit_b32_frozen_head`: the `openai/clip-vit-base-patch32` image encoder frozen, with only a trainable linear classification head.
 
+The CLIP loader explicitly requests Hugging Face `safetensors` weights. This preserves compatibility with the supported local Torch 2.2 smoke-test environment and does not bypass the Transformers/Torch loading security guard for unsafe pickle checkpoints.
+
 What does not change: the labels remain exactly cardboard, glass, metal, paper, plastic, and trash; `needs_review` remains a routing policy outcome; calibration and threshold selection use validation data only; external images are excluded from training, hyperparameter search, early stopping, calibration, thresholding, and model selection.
 
 ### Editable install and validation

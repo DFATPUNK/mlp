@@ -22,14 +22,21 @@ def assert_only_head_trainable(module, head_prefix: str = "classifier") -> None:
         raise ValueError(f"Frozen CLIP candidate has trainable encoder parameters: {unexpected}")
 
 
+def load_clip_vision_model(hf_model_id: str):
+    from transformers import CLIPVisionModel
+
+    return CLIPVisionModel.from_pretrained(
+        hf_model_id,
+        use_safetensors=True,
+    )
+
+
 def build_clip_frozen_head(num_classes: int, hf_model_id: str = DEFAULT_HF_MODEL_ID, vision_model_factory: Callable[[str], object] | None = None):
     import torch
 
     hf_model_id = hf_model_id or DEFAULT_HF_MODEL_ID
     if vision_model_factory is None:
-        from transformers import CLIPVisionModel
-
-        vision_model_factory = CLIPVisionModel.from_pretrained
+        vision_model_factory = load_clip_vision_model
 
     class ClipFrozenHeadClassifier(torch.nn.Module):
         def __init__(self):
