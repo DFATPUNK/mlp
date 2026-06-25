@@ -20,6 +20,15 @@ from waste_poc.model_selection import select_best_candidate_by_validation_metric
 from waste_poc.utils import CLASS_NAMES, file_sha256_text, read_json, set_seed, write_json
 
 
+def resolve_run_output_dir(output_dir: str | None, root: Path, mode: str) -> Path:
+    if output_dir is None:
+        return root / "artifacts" / "runs" / f"{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}_{mode}"
+    path = Path(output_dir)
+    if path.is_absolute():
+        return path
+    return root / path
+
+
 def run_epoch(model, loader, criterion, optimizer, device, use_amp: bool, training: bool):
     import torch
 
@@ -142,8 +151,7 @@ def main() -> int:
         config["training"]["frozen_epochs" if config["model"]["mode"] == "frozen_backbone" else "fine_tune_epochs"] = args.epochs
     set_seed(config.get("seed", 42))
     mode = config["model"].get("mode", "frozen_backbone")
-    run_id = args.output_dir or f"{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}_{mode}"
-    run_dir = ROOT / "artifacts" / "runs" / run_id if not Path(run_id).is_absolute() else Path(run_id)
+    run_dir = resolve_run_output_dir(args.output_dir, ROOT, mode)
     run_dir.mkdir(parents=True, exist_ok=True)
     write_json(run_dir / "config.json", config)
     search = config.get("training", {}).get("hyperparameter_search") if config.get("model", {}).get("family") == "clip_vit_b32_frozen_head" else None
