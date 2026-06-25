@@ -177,7 +177,7 @@ python -m unittest discover -s tests -v
 
 ### CLIP local smoke-test command
 
-Local CPU or MPS runs are supported for smoke tests and inference, but canonical training is recommended on a GPU runtime such as Colab. This smoke test may download or reuse cached CLIP weights, writes a disposable run under `artifacts/runs/`, and does not validate model quality.
+Local CPU or MPS runs are supported for smoke tests and inference, but canonical training is recommended on a GPU runtime such as Colab. `--output-dir` is an absolute path or a path relative to the POC root. This smoke test may download or reuse cached CLIP weights, writes a disposable run under `artifacts/runs/`, and does not validate model quality.
 
 ```bash
 STAMP="$(date +%Y%m%d_%H%M%S)"

@@ -147,6 +147,8 @@ class Phase06Tests(unittest.TestCase):
         self.assertFalse(any("fine_tune" in command for command in flattened))
         self.assertFalse(any("scripts/evaluate_external.py" in command for command in flattened))
         self.assertTrue(any("scripts/evaluate.py" in command for command in flattened))
+        train_commands = [command for command in commands if "scripts/train.py" in command]
+        self.assertEqual(train_commands[0][train_commands[0].index("--output-dir") + 1], "artifacts/runs/clip_smoke")
 
     def test_external_evaluation_runs_only_with_include_external(self):
         run_poc = load_script("run_poc.py")
@@ -157,6 +159,39 @@ class Phase06Tests(unittest.TestCase):
         external = [command for command in commands if "scripts/evaluate_external.py" in command]
         self.assertEqual(len(external), 1)
         self.assertIn("artifacts/runs/clip_smoke/external_diagnostic_v1", external[0])
+
+    def test_train_output_dir_defaults_under_artifacts_runs(self):
+        train = load_script("train.py")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            resolved = train.resolve_run_output_dir(None, root, "frozen_backbone")
+
+        self.assertEqual(resolved.parent, root / "artifacts" / "runs")
+        self.assertTrue(resolved.name.endswith("_frozen_backbone"))
+
+    def test_train_output_dir_keeps_absolute_path(self):
+        train = load_script("train.py")
+        with tempfile.TemporaryDirectory() as tmp:
+            requested = Path(tmp) / "abs" / "run"
+            resolved = train.resolve_run_output_dir(str(requested), Path(tmp) / "root", "frozen_backbone")
+
+        self.assertEqual(resolved, requested)
+
+    def test_train_output_dir_resolves_artifacts_runs_once(self):
+        train = load_script("train.py")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            resolved = train.resolve_run_output_dir("artifacts/runs/smoke", root, "frozen_backbone")
+
+        self.assertEqual(resolved, root / "artifacts" / "runs" / "smoke")
+
+    def test_train_output_dir_resolves_simple_relative_under_root(self):
+        train = load_script("train.py")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            resolved = train.resolve_run_output_dir("custom/run", root, "frozen_backbone")
+
+        self.assertEqual(resolved, root / "custom" / "run")
 
     def test_external_evaluation_initializes_inference_session_once(self):
         evaluate_external = load_script("evaluate_external.py")

@@ -18,6 +18,10 @@ def run(cmd: list[str]) -> None:
     subprocess.run(cmd, cwd=ROOT, check=True)
 
 
+def run_output_arg(run_name: str) -> str:
+    return f"artifacts/runs/{run_name}"
+
+
 def should_run_fine_tune(config: dict, skip_fine_tune: bool) -> bool:
     if skip_fine_tune:
         return False
@@ -43,11 +47,11 @@ def main(argv: list[str] | None = None, runner=run) -> int:
     if not args.skip_manifest:
         runner([sys.executable, "scripts/build_manifest.py", "--config", args.config])
     frozen_run = args.run_name or "poc_frozen_backbone"
-    runner([sys.executable, "scripts/train.py", "--config", args.config, "--output-dir", frozen_run, "--mode", "frozen_backbone", "--device", args.device])
+    runner([sys.executable, "scripts/train.py", "--config", args.config, "--output-dir", run_output_arg(frozen_run), "--mode", "frozen_backbone", "--device", args.device])
     final_run = frozen_run
     if should_run_fine_tune(config, args.skip_fine_tune):
         final_run = f"{frozen_run}_fine_tune"
-        runner([sys.executable, "scripts/train.py", "--config", args.config, "--output-dir", final_run, "--mode", "fine_tune", "--resume-checkpoint", f"artifacts/runs/{frozen_run}/best_model.pt", "--device", args.device])
+        runner([sys.executable, "scripts/train.py", "--config", args.config, "--output-dir", run_output_arg(final_run), "--mode", "fine_tune", "--resume-checkpoint", f"artifacts/runs/{frozen_run}/best_model.pt", "--device", args.device])
     checkpoint = f"artifacts/runs/{final_run}/best_model.pt"
     runner([sys.executable, "scripts/evaluate.py", "--checkpoint", checkpoint, "--device", args.device])
     if args.include_external:
