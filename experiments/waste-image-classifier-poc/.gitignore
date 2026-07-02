@@ -4,6 +4,9 @@ data/manifests/**
 !data/manifests/.gitkeep
 data/external_images/images/**
 !data/external_images/images/.gitkeep
+data/feedback/feedback_manifest.csv
+data/feedback/images/**
+data/feedback/candidates/**
 artifacts/**
 !artifacts/.gitkeep
 *.pt
