@@ -49,6 +49,12 @@ GATE_CANDIDATE_COLUMNS = [
 
 SOURCES = {"external_diagnostic", "workflow_feedback", "manual_capture", "public_dataset"}
 SOURCE_SPLITS = {"external_diagnostic_v1", "workflow_feedback", "manual_capture", "public_dataset"}
+SOURCE_SPLIT_BY_SOURCE = {
+    "external_diagnostic": "external_diagnostic_v1",
+    "workflow_feedback": "workflow_feedback",
+    "manual_capture": "manual_capture",
+    "public_dataset": "public_dataset",
+}
 ORIGINAL_DECISIONS = {"auto_route", "needs_review"}
 HUMAN_OUTCOMES = {"confirmed", "corrected", "rejected", "unresolved"}
 REVIEW_REASONS = {
@@ -144,10 +150,14 @@ def validate_feedback_rows(rows: list[dict[str, str]]) -> list[str]:
             messages.append(f"{label}: predicted_label must be one of {CLASS_NAMES}")
         if confirmed_label and confirmed_label not in CLASS_NAMES:
             messages.append(f"{label}: confirmed_label must be blank or one of {CLASS_NAMES}")
-        if row.get("source") not in SOURCES:
+        source = row.get("source")
+        source_split = row.get("source_split")
+        if source not in SOURCES:
             messages.append(f"{label}: source must be one of {sorted(SOURCES)}")
-        if row.get("source_split") not in SOURCE_SPLITS:
+        if source_split not in SOURCE_SPLITS:
             messages.append(f"{label}: source_split must be one of {sorted(SOURCE_SPLITS)}")
+        if source in SOURCE_SPLIT_BY_SOURCE and source_split in SOURCE_SPLITS and source_split != SOURCE_SPLIT_BY_SOURCE[source]:
+            messages.append(f"{label}: source={source} requires source_split={SOURCE_SPLIT_BY_SOURCE[source]}")
         if row.get("original_decision") not in ORIGINAL_DECISIONS:
             messages.append(f"{label}: original_decision must be one of {sorted(ORIGINAL_DECISIONS)}")
         if human_outcome not in HUMAN_OUTCOMES:
@@ -171,6 +181,8 @@ def validate_feedback_rows(rows: list[dict[str, str]]) -> list[str]:
             messages.append(f"{label}: corrected rows require a valid confirmed_label")
         if human_outcome == "rejected" and confirmed_label:
             messages.append(f"{label}: rejected rows must leave confirmed_label blank")
+        if human_outcome == "rejected" and _is_true(row.get("auto_route_eligible", "")):
+            messages.append(f"{label}: rejected rows must have auto_route_eligible=false")
         if human_outcome == "unresolved" and (_is_true(row.get("approved_for_classifier_training", "")) or _is_true(row.get("approved_for_gate_training", ""))):
             messages.append(f"{label}: unresolved rows cannot be approved for training datasets")
         if _is_true(row.get("auto_route_eligible", "")) and review_reason in AUTO_ROUTE_INELIGIBLE_REASONS:
@@ -220,8 +232,8 @@ def build_feedback_candidates(manifest_path: str | Path, output_dir: str | Path,
     rows = validate_feedback_manifest(manifest_path)
     classification_rows = classifier_candidate_rows(rows)
     gate_rows = gate_candidate_rows(rows)
-    promoted_rows = [row for row in [*classification_rows, *gate_rows] if row["source_split"] == EXTERNAL_DIAGNOSTIC_V1]
-    if promoted_rows and not allow_promoted_external_diagnostic:
+    promoted_feedback_ids = {row["feedback_id"] for row in [*classification_rows, *gate_rows] if row["source_split"] == EXTERNAL_DIAGNOSTIC_V1}
+    if promoted_feedback_ids and not allow_promoted_external_diagnostic:
         raise FeedbackValidationError(
             [
                 "external_diagnostic_v1 rows would be included in candidate outputs.",
@@ -233,7 +245,7 @@ def build_feedback_candidates(manifest_path: str | Path, output_dir: str | Path,
     write_csv(output_dir / "classification_feedback_manifest.csv", CLASSIFIER_CANDIDATE_COLUMNS, classification_rows)
     write_csv(output_dir / "review_gate_feedback_manifest.csv", GATE_CANDIDATE_COLUMNS, gate_rows)
     leakage_notice_written = False
-    if promoted_rows and allow_promoted_external_diagnostic:
+    if promoted_feedback_ids and allow_promoted_external_diagnostic:
         write_text(output_dir / "leakage_notice.md", LEAKAGE_NOTICE)
         leakage_notice_written = True
 
@@ -241,7 +253,7 @@ def build_feedback_candidates(manifest_path: str | Path, output_dir: str | Path,
         "feedback_rows": len(rows),
         "classification_candidate_rows": len(classification_rows),
         "review_gate_candidate_rows": len(gate_rows),
-        "promoted_external_diagnostic_rows": len(promoted_rows),
+        "promoted_external_diagnostic_rows": len(promoted_feedback_ids),
         "allow_promoted_external_diagnostic": allow_promoted_external_diagnostic,
         "leakage_notice_written": leakage_notice_written,
         "source_split_counts": dict(Counter(row["source_split"] for row in rows)),

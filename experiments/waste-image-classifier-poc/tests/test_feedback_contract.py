@@ -131,6 +131,25 @@ class FeedbackContractTests(unittest.TestCase):
                 ]
             )
 
+    def test_source_and_source_split_mismatch_fails(self):
+        with self.assertRaisesRegex(FeedbackValidationError, "source=workflow_feedback requires source_split=workflow_feedback"):
+            self.validate_rows([base_row(source="workflow_feedback", source_split="manual_capture")])
+
+    def test_rejected_row_must_not_be_auto_route_eligible(self):
+        with self.assertRaisesRegex(FeedbackValidationError, "rejected rows must have auto_route_eligible=false"):
+            self.validate_rows(
+                [
+                    base_row(
+                        human_outcome="rejected",
+                        confirmed_label="",
+                        auto_route_eligible="true",
+                        review_reason="other",
+                        approved_for_classifier_training="false",
+                        approved_for_gate_training="true",
+                    )
+                ]
+            )
+
     def test_builder_rejects_external_diagnostic_candidates_by_default(self):
         with tempfile.TemporaryDirectory() as tmp:
             manifest = Path(tmp) / "feedback.csv"
@@ -164,7 +183,7 @@ class FeedbackContractTests(unittest.TestCase):
             classification = read_csv(output_dir / "classification_feedback_manifest.csv")
             notice_exists = (output_dir / "leakage_notice.md").exists()
 
-        self.assertEqual(summary["promoted_external_diagnostic_rows"], 2)
+        self.assertEqual(summary["promoted_external_diagnostic_rows"], 1)
         self.assertEqual(classification[0]["source_split"], "external_diagnostic_v1")
         self.assertTrue(notice_exists)
 
