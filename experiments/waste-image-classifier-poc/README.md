@@ -255,3 +255,32 @@ python scripts/build_feedback_candidates.py \
 ```
 
 By default, candidate building refuses to promote approved `external_diagnostic_v1` rows. Use `--allow-promoted-external-diagnostic` only when intentionally converting inspected diagnostic images into feedback-derived candidate data; doing so writes `leakage_notice.md` and means a new untouched external final set is required before future model selection.
+
+## Phase 0.8 V2 dataset assembly contract
+
+Phase 0.8 adds a deterministic assembly layer for a future V2 dataset. It combines the immutable TrashNet manifest with reviewed feedback candidates and optional future public-source candidates. It does not train or evaluate a model, claim a new score, or import any public dataset. See `docs/v2_dataset_contract.md` and `docs/public_dataset_intake.md`.
+
+Build V2 manifests from local candidate files:
+
+```bash
+python scripts/build_v2_dataset.py \
+  --trashnet-manifest data/manifests/trashnet_manifest.csv \
+  --classifier-feedback-manifest data/feedback/candidates/classification_feedback_manifest.csv \
+  --gate-feedback-manifest data/feedback/candidates/review_gate_feedback_manifest.csv \
+  --output-dir data/v2/local_candidate
+```
+
+Future public-source intake must use explicit mapping rules:
+
+```bash
+python scripts/build_v2_dataset.py \
+  --trashnet-manifest data/manifests/trashnet_manifest.csv \
+  --classifier-feedback-manifest data/feedback/candidates/classification_feedback_manifest.csv \
+  --gate-feedback-manifest data/feedback/candidates/review_gate_feedback_manifest.csv \
+  --public-classifier-manifest data/public_sources/public_classifier_candidates.csv \
+  --public-gate-manifest data/public_sources/public_gate_candidates.csv \
+  --label-mapping data/public_sources/label_mapping.csv \
+  --output-dir data/v2/local_candidate
+```
+
+The builder blocks `external_diagnostic_v1` by default, even when supplied through Phase 0.7 candidate CSVs. Use `--allow-promoted-external-diagnostic` only when intentionally retiring that diagnostic set from future comparative or final evaluation.
