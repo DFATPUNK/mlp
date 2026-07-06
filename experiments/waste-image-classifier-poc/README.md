@@ -232,3 +232,24 @@ python scripts/compare_models.py \
 ```
 
 The comparison report separates internal validation metrics, untouched internal test metrics, and external diagnostic metrics. A new unseen external set is required before final model selection.
+
+## Phase 0.7 feedback contract
+
+Phase 0.7 defines a human-review feedback manifest and candidate dataset builder without retraining. Feedback separates six-class material labels from the human `auto_route_eligible` judgment used by a future review gate. See `docs/feedback_contract.md` and `docs/feedback_annotation_guide.md`.
+
+Validate a feedback manifest:
+
+```bash
+python scripts/validate_feedback_manifest.py \
+  --manifest data/feedback/feedback_manifest.template.csv
+```
+
+Build local candidate manifests:
+
+```bash
+python scripts/build_feedback_candidates.py \
+  --manifest data/feedback/feedback_manifest.template.csv \
+  --output-dir data/feedback/candidates/template_demo
+```
+
+By default, candidate building refuses to promote approved `external_diagnostic_v1` rows. Use `--allow-promoted-external-diagnostic` only when intentionally converting inspected diagnostic images into feedback-derived candidate data; doing so writes `leakage_notice.md` and means a new untouched external final set is required before future model selection.
