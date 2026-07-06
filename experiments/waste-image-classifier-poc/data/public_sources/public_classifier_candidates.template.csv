@@ -1,0 +1,4 @@
+public_row_id,source_dataset_id,source_item_id,relative_path,source_label,mapped_label,mapping_rule_id,annotation_type,object_count,approved_for_classifier_training,annotation_notes
+pub_cls_001,fictional_public_v1,item_001,ingested/fictional_public_v1/item_001.jpg,clear plastic bottle,plastic,map_fictional_plastic_bottle,single_object,1,true,fictional approved single object example
+pub_cls_002,fictional_public_v1,item_002,ingested/fictional_public_v1/item_002.jpg,cardboard box,cardboard,map_fictional_cardboard_box,cropped_object,1,true,fictional cropped object example
+pub_cls_003,fictional_public_v1,item_003,ingested/fictional_public_v1/item_003.jpg,banana peel,,map_fictional_banana_excluded,single_object,1,false,fictional excluded unsupported source label

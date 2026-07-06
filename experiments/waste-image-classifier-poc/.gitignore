@@ -7,6 +7,11 @@ data/external_images/images/**
 data/feedback/feedback_manifest.csv
 data/feedback/images/**
 data/feedback/candidates/**
+data/public_sources/ingested/
+data/public_sources/public_classifier_candidates.csv
+data/public_sources/public_gate_candidates.csv
+data/public_sources/label_mapping.csv
+data/v2/
 artifacts/**
 !artifacts/.gitkeep
 *.pt
