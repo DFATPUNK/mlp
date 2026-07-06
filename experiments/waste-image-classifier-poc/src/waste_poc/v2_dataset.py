@@ -5,7 +5,7 @@ import hashlib
 from collections import Counter
 from pathlib import Path, PurePosixPath
 
-from .feedback import CLASSIFIER_CANDIDATE_COLUMNS, EXTERNAL_DIAGNOSTIC_V1, GATE_CANDIDATE_COLUMNS, REVIEW_REASONS
+from .feedback import CLASSIFIER_CANDIDATE_COLUMNS, EXTERNAL_DIAGNOSTIC_V1, GATE_CANDIDATE_COLUMNS, REVIEW_REASONS, SOURCE_SPLIT_BY_SOURCE
 from .utils import CLASS_NAMES, ensure_dir, sha256_file, write_json, write_text
 
 TRASHNET_COLUMNS = [
@@ -192,6 +192,23 @@ def _validate_common_relative_path(messages: list[str], label: str, row: dict[st
         messages.append(f"{label}: relative_path must be relative and must not use parent traversal")
 
 
+def _normalized_relative_path(value: str) -> str:
+    if not _safe_relative_path(value):
+        return value
+    return PurePosixPath(value).as_posix()
+
+
+def _validate_feedback_provenance(messages: list[str], label: str, row: dict[str, str]) -> None:
+    source = row.get("source", "")
+    source_split = row.get("source_split", "")
+    expected_split = SOURCE_SPLIT_BY_SOURCE.get(source)
+    if expected_split is None:
+        messages.append(f"{label}: source must be one of {sorted(SOURCE_SPLIT_BY_SOURCE)}")
+        return
+    if source_split != expected_split:
+        messages.append(f"{label}: source={source} requires source_split={expected_split}; got source_split={source_split or '<blank>'}")
+
+
 def _validate_trashnet_rows(rows: list[dict[str, str]], messages: list[str]) -> None:
     image_ids = _count_duplicates(rows, "image_id")
     for index, row in enumerate(rows, start=2):
@@ -222,6 +239,7 @@ def _validate_feedback_classifier_rows(rows: list[dict[str, str]], messages: lis
             messages.append(f"{label}: duplicate image_id {row.get('image_id')!r}")
         if row.get("confirmed_label") not in CLASS_NAMES:
             messages.append(f"{label}: confirmed_label must be one of {CLASS_NAMES}")
+        _validate_feedback_provenance(messages, label, row)
         if row.get("source_split") in {"validation", "test"}:
             messages.append(f"{label}: feedback candidates must not claim validation or test source_split")
         _validate_common_relative_path(messages, label, row)
@@ -243,6 +261,7 @@ def _validate_feedback_gate_rows(rows: list[dict[str, str]], messages: list[str]
             messages.append(f"{label}: auto_route_eligible must be lowercase true or false")
         if row.get("review_reason") not in REVIEW_REASONS:
             messages.append(f"{label}: review_reason must be one of {sorted(REVIEW_REASONS)}")
+        _validate_feedback_provenance(messages, label, row)
         if row.get("source_split") in {"validation", "test"}:
             messages.append(f"{label}: feedback candidates must not claim validation or test source_split")
         _validate_common_relative_path(messages, label, row)
@@ -352,31 +371,6 @@ def _external_diagnostic_feedback_ids(classifier_rows: list[dict[str, str]], gat
     }
 
 
-def _trashnet_validation_test_keys(trashnet_rows: list[dict[str, str]]) -> tuple[set[str], set[str]]:
-    image_ids = {row["image_id"] for row in trashnet_rows if row["split"] in {"validation", "test"}}
-    relative_paths = {row["relative_path"] for row in trashnet_rows if row["split"] in {"validation", "test"}}
-    return image_ids, relative_paths
-
-
-def _validate_no_validation_test_overlap(
-    enrichment_rows: list[dict[str, str]],
-    *,
-    id_key: str | None,
-    validation_test_image_ids: set[str],
-    validation_test_relative_paths: set[str],
-    label: str,
-    messages: list[str],
-) -> None:
-    for row in enrichment_rows:
-        row_id = row.get(id_key, "") if id_key else row.get("source_item_id", "")
-        if id_key and row_id in validation_test_image_ids:
-            messages.append(f"{label} row {row_id}: would duplicate a TrashNet validation/test image_id")
-        if row.get("source_item_id", "") in validation_test_image_ids:
-            messages.append(f"{label} row {row.get('source_item_id')}: would duplicate a TrashNet validation/test source_item_id")
-        if row.get("relative_path", "") in validation_test_relative_paths:
-            messages.append(f"{label} row {row_id}: would duplicate a TrashNet validation/test relative_path")
-
-
 def _classification_identity(row: dict[str, str]) -> tuple[str, str, str]:
     return (row["source_kind"], row["source_dataset_id"], row["source_item_id"] or row["image_id"])
 
@@ -407,6 +401,71 @@ def _validate_classification_conflicts(rows: list[dict[str, str]], messages: lis
             messages.append(f"classification output identity {identity!r} has conflicting labels {previous['label']!r} and {row['label']!r}")
         else:
             messages.append(f"classification output identity {identity!r} is duplicated")
+
+
+def _row_identity_message(row: dict[str, str]) -> str:
+    stable_id = row.get("dataset_row_id") or row.get("gate_row_id") or "<missing row id>"
+    return (
+        f"{stable_id} source_kind={row.get('source_kind')} source_dataset_id={row.get('source_dataset_id')} "
+        f"source_item_id={row.get('source_item_id')} image_id={row.get('image_id')} relative_path={row.get('relative_path')}"
+    )
+
+
+def _validate_unique_non_empty_classification_sha(rows: list[dict[str, str]], messages: list[str]) -> None:
+    by_sha: dict[str, dict[str, str]] = {}
+    for row in rows:
+        digest = row.get("sha256", "")
+        if not digest:
+            continue
+        previous = by_sha.get(digest)
+        if previous is None:
+            by_sha[digest] = row
+            continue
+        message = (
+            f"duplicate non-empty sha256 {digest}: {_row_identity_message(previous)} label={previous['label']} "
+            f"and {_row_identity_message(row)} label={row['label']}"
+        )
+        if previous["label"] != row["label"]:
+            message += f"; conflicting labels {previous['label']} and {row['label']}"
+        messages.append(message)
+
+
+def _immutable_identity_message(enrichment_row: dict[str, str], immutable_row: dict[str, str], reason: str) -> str:
+    return (
+        f"{_row_identity_message(enrichment_row)} reuses TrashNet validation/test {reason} from "
+        f"{_row_identity_message(immutable_row)}; validation/test splits are immutable"
+    )
+
+
+def _validate_enrichment_does_not_reuse_validation_test_identities(
+    classification_rows: list[dict[str, str]],
+    gate_rows: list[dict[str, str]],
+    messages: list[str],
+) -> None:
+    immutable_rows = [row for row in classification_rows if row["source_kind"] == "trashnet" and row["split"] in {"validation", "test"}]
+    immutable_by_sha = {row["sha256"]: row for row in immutable_rows if row.get("sha256")}
+    immutable_by_image_id = {row["image_id"]: row for row in immutable_rows if row.get("image_id")}
+    immutable_by_context_path = {
+        (row["source_dataset_id"], _normalized_relative_path(row["relative_path"])): row
+        for row in immutable_rows
+        if row.get("source_dataset_id") and row.get("relative_path")
+    }
+
+    enrichment_rows = [row for row in classification_rows if row["source_kind"] != "trashnet"]
+    enrichment_rows.extend(row for row in gate_rows if row["source_kind"] != "trashnet")
+    for row in enrichment_rows:
+        digest = row.get("sha256", "")
+        if digest and digest in immutable_by_sha:
+            messages.append(_immutable_identity_message(row, immutable_by_sha[digest], f"sha256={digest}"))
+            continue
+        candidate_ids = [row.get("image_id", ""), row.get("source_item_id", "")]
+        matching_image_id = next((candidate_id for candidate_id in candidate_ids if candidate_id and candidate_id in immutable_by_image_id), None)
+        if matching_image_id:
+            messages.append(_immutable_identity_message(row, immutable_by_image_id[matching_image_id], f"image_id={matching_image_id}"))
+            continue
+        context_path = (row.get("source_dataset_id", ""), _normalized_relative_path(row.get("relative_path", "")))
+        if context_path in immutable_by_context_path:
+            messages.append(_immutable_identity_message(row, immutable_by_context_path[context_path], f"relative_path={context_path[1]} in source_dataset_id={context_path[0]}"))
 
 
 def _validate_gate_duplicates(rows: list[dict[str, str]], messages: list[str]) -> None:
@@ -580,40 +639,6 @@ def build_v2_dataset(
             ]
         )
 
-    validation_test_image_ids, validation_test_relative_paths = _trashnet_validation_test_keys(trashnet_rows)
-    _validate_no_validation_test_overlap(
-        classifier_feedback_rows,
-        id_key="image_id",
-        validation_test_image_ids=validation_test_image_ids,
-        validation_test_relative_paths=validation_test_relative_paths,
-        label="classifier feedback",
-        messages=messages,
-    )
-    _validate_no_validation_test_overlap(
-        gate_feedback_rows,
-        id_key="image_id",
-        validation_test_image_ids=validation_test_image_ids,
-        validation_test_relative_paths=validation_test_relative_paths,
-        label="gate feedback",
-        messages=messages,
-    )
-    _validate_no_validation_test_overlap(
-        public_classifier_rows,
-        id_key=None,
-        validation_test_image_ids=validation_test_image_ids,
-        validation_test_relative_paths=validation_test_relative_paths,
-        label="public classifier",
-        messages=messages,
-    )
-    _validate_no_validation_test_overlap(
-        public_gate_rows,
-        id_key=None,
-        validation_test_image_ids=validation_test_image_ids,
-        validation_test_relative_paths=validation_test_relative_paths,
-        label="public gate",
-        messages=messages,
-    )
-
     if messages:
         raise V2DatasetError(messages)
 
@@ -631,6 +656,8 @@ def build_v2_dataset(
     _validate_output_rows(classification_rows, CLASSIFICATION_OUTPUT_COLUMNS, "dataset_row_id", output_messages)
     _validate_output_rows(gate_rows, GATE_OUTPUT_COLUMNS, "gate_row_id", output_messages)
     _validate_classification_conflicts(classification_rows, output_messages)
+    _validate_unique_non_empty_classification_sha(classification_rows, output_messages)
+    _validate_enrichment_does_not_reuse_validation_test_identities(classification_rows, gate_rows, output_messages)
     _validate_gate_duplicates(gate_rows, output_messages)
     if output_messages:
         raise V2DatasetError(output_messages)

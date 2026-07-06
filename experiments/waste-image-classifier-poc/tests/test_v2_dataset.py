@@ -217,6 +217,16 @@ class V2DatasetTests(unittest.TestCase):
             with self.assertRaisesRegex(V2DatasetError, "external_diagnostic_v1"):
                 self.build(paths)
 
+    def test_feedback_source_and_source_split_mismatch_fails(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            paths = self.make_inputs(
+                Path(tmp_dir),
+                classifier_feedback_rows=[feedback_classifier_row(source="workflow_feedback", source_split="external_diagnostic_v1")],
+            )
+
+            with self.assertRaisesRegex(V2DatasetError, "source=workflow_feedback requires source_split=workflow_feedback"):
+                self.build(paths)
+
     def test_external_diagnostic_feedback_requires_opt_in_and_writes_notice(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             paths = self.make_inputs(
@@ -249,6 +259,63 @@ class V2DatasetTests(unittest.TestCase):
         self.assertEqual(public_rows[0]["label"], "plastic")
         self.assertEqual(public_rows[0]["original_label"], "plastic bottle")
         self.assertEqual(public_rows[0]["mapping_rule_id"], "map_plastic_bottle")
+
+    def test_same_sha256_from_different_sources_with_conflicting_labels_fails(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp = Path(tmp_dir)
+            feedback_root = tmp / "feedback_images"
+            public_root = tmp / "public_images"
+            feedback_path = feedback_root / "feedback" / "same.jpg"
+            public_path = public_root / "ingested" / "fictional_public_v1" / "same.jpg"
+            feedback_path.parent.mkdir(parents=True)
+            public_path.parent.mkdir(parents=True)
+            feedback_path.write_bytes(b"identical image bytes")
+            public_path.write_bytes(b"identical image bytes")
+            paths = self.make_inputs(
+                tmp,
+                classifier_feedback_rows=[feedback_classifier_row(relative_path="feedback/same.jpg", confirmed_label="plastic")],
+                public_classifier_rows=[
+                    public_classifier_row(
+                        relative_path="ingested/fictional_public_v1/same.jpg",
+                        source_label="glass shard",
+                        mapped_label="glass",
+                        mapping_rule_id="map_glass",
+                    )
+                ],
+                mapping_rows=[mapping_row(mapping_rule_id="map_glass", source_label="glass shard", mapped_label="glass")],
+            )
+
+            with self.assertRaisesRegex(V2DatasetError, "duplicate non-empty sha256.*plastic.*glass"):
+                self.build(
+                    paths,
+                    public_classifier_manifest=paths["public_classifier"],
+                    label_mapping=paths["mapping"],
+                    feedback_image_root=feedback_root,
+                    public_image_root=public_root,
+                )
+
+    def test_blank_sha256_values_do_not_falsely_conflict(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            paths = self.make_inputs(
+                Path(tmp_dir),
+                classifier_feedback_rows=[feedback_classifier_row(confirmed_label="plastic")],
+                public_classifier_rows=[
+                    public_classifier_row(
+                        source_item_id="item_2",
+                        source_label="glass shard",
+                        mapped_label="glass",
+                        mapping_rule_id="map_glass",
+                    )
+                ],
+                mapping_rows=[mapping_row(mapping_rule_id="map_glass", source_label="glass shard", mapped_label="glass")],
+            )
+            self.build(paths, public_classifier_manifest=paths["public_classifier"], label_mapping=paths["mapping"])
+
+            rows = read_csv(paths["output"] / "v2_classification_manifest.csv")
+
+        enrichment_rows = [row for row in rows if row["source_kind"] in {"feedback", "public_dataset"}]
+        self.assertEqual(len(enrichment_rows), 2)
+        self.assertEqual([row["sha256"] for row in enrichment_rows], ["", ""])
 
     def test_public_classifier_with_multiple_objects_is_rejected(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -287,6 +354,26 @@ class V2DatasetTests(unittest.TestCase):
         self.assertEqual(rows[0]["auto_route_eligible"], "false")
         self.assertEqual(rows[0]["annotation_type"], "scene")
         self.assertEqual(rows[0]["object_count"], "3")
+
+    def test_feedback_candidate_colliding_with_trashnet_validation_image_id_fails(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            paths = self.make_inputs(
+                Path(tmp_dir),
+                classifier_feedback_rows=[feedback_classifier_row(image_id="trash_val")],
+            )
+
+            with self.assertRaisesRegex(V2DatasetError, "trash_val.*validation/test splits are immutable"):
+                self.build(paths)
+
+    def test_feedback_candidate_colliding_with_trashnet_test_image_id_fails(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            paths = self.make_inputs(
+                Path(tmp_dir),
+                classifier_feedback_rows=[feedback_classifier_row(image_id="trash_test")],
+            )
+
+            with self.assertRaisesRegex(V2DatasetError, "trash_test.*validation/test splits are immutable"):
+                self.build(paths)
 
     def test_duplicate_public_source_identity_fails_clearly(self):
         with tempfile.TemporaryDirectory() as tmp_dir:

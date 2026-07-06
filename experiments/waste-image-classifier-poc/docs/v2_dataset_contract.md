@@ -12,6 +12,8 @@ The existing TrashNet manifest remains the baseline. Its `train`, `validation`, 
 
 This keeps validation and test comparable to the original POC and prevents new, inspected, or weakly mapped examples from silently entering model-selection splits.
 
+Enrichment sources must not reuse immutable TrashNet validation or test identities. The builder checks matching non-empty SHA-256 values, matching image IDs, and matching relative paths when the source dataset context is the same.
+
 ## Two Datasets, Two Label Spaces
 
 The classification dataset uses only the six material labels:
@@ -46,7 +48,11 @@ Every V2 row preserves where it came from:
 - `mapping_rule_id`: the explicit approved mapping rule used for public classifier rows.
 - `source_commit` and `sha256`: preserved when the source manifest provides them or when a local image root is explicitly supplied.
 
+Feedback candidate provenance is immutable. The V2 builder enforces these `source` / `source_split` pairs directly: `external_diagnostic` / `external_diagnostic_v1`, `workflow_feedback` / `workflow_feedback`, `manual_capture` / `manual_capture`, and `public_dataset` / `public_dataset`.
+
 Public-source labels are never mapped automatically. Each accepted public classifier row must reference an approved mapping rule that maps a specific `source_dataset_id` and `source_label` to one of the six supported material labels.
+
+When non-empty SHA-256 values are available, the classification manifest rejects duplicate hashes across TrashNet, feedback, and public-source classifier rows. Blank hashes are allowed when source images are not locally available.
 
 ## External Diagnostic Promotion
 
