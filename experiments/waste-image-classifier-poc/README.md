@@ -33,7 +33,7 @@ docs/                            External-image checklist and model-card templat
 
 ## 4. Dataset provenance and class contract
 
-The downloader uses only the original upstream repository: `https://github.com/garythung/trashnet.git`. It records the resolved Git commit in `data/raw/trashnet_source_metadata.json` and searches for folders containing all six expected classes: cardboard, glass, metal, paper, plastic, and trash.
+The downloader uses only the original upstream repository: `https://github.com/garythung/trashnet.git`. It records the resolved Git commit in `data/raw/trashnet_source_metadata.json` and searches for folders containing all six expected classes: cardboard, glass, metal, paper, plastic, and trash. If the class folders are not already extracted, `scripts/download_trashnet.py` automatically extracts the upstream `data/dataset-resized.zip` archive and records its SHA-256 in the source metadata.
 
 `needs_review` is never accepted as a training label. It is a routing policy outcome when calibrated confidence is below the selected validation threshold.
 
@@ -49,6 +49,8 @@ Use a GPU runtime when available. Colab usually includes PyTorch and TorchVision
 !python -m pip install -e .
 !python scripts/run_poc.py --config configs/efficientnet_b0_baseline.yaml
 ```
+
+The download step is self-contained in clean Colab runtimes: `scripts/download_trashnet.py` clones TrashNet and automatically extracts the upstream `data/dataset-resized.zip` archive before manifest generation.
 
 If Colab does not include a compatible Torch/TorchVision pair, install one using the official PyTorch instructions for the selected runtime.
 
