@@ -8,8 +8,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 
-from waste_poc.manifests import find_trashnet_image_root
-from waste_poc.utils import CLASS_NAMES, utc_now_iso, write_json
+from waste_poc.trashnet_download import ensure_trashnet_image_root, trashnet_source_metadata
+from waste_poc.utils import write_json
 
 REPOSITORY_URL = "https://github.com/garythung/trashnet.git"
 
@@ -40,18 +40,20 @@ def main() -> int:
     run_git(["fetch", "--all", "--tags"], cwd=source_dir)
     run_git(["checkout", args.revision], cwd=source_dir)
     commit = run_git(["rev-parse", "HEAD"], cwd=source_dir)
-    image_root = find_trashnet_image_root(source_dir)
-    metadata = {
-        "repository_url": REPOSITORY_URL,
-        "requested_revision": args.revision,
-        "resolved_commit_sha": commit,
-        "download_timestamp": utc_now_iso(),
-        "expected_class_names": CLASS_NAMES,
-        "source_directory_detected": str(image_root.relative_to(ROOT)),
-    }
+    extraction = ensure_trashnet_image_root(source_dir)
+    metadata = trashnet_source_metadata(
+        repository_url=REPOSITORY_URL,
+        requested_revision=args.revision,
+        resolved_commit_sha=commit,
+        root=ROOT,
+        extraction=extraction,
+    )
     write_json(raw_dir / "trashnet_source_metadata.json", metadata)
     print(f"Resolved TrashNet commit: {commit}")
-    print(f"Detected image root: {image_root}")
+    print(f"Detected image root: {extraction.image_root}")
+    if extraction.archive_path:
+        print(f"Archive SHA-256: {extraction.archive_sha256}")
+        print(f"Archive extracted this run: {extraction.archive_extracted_this_run}")
     return 0
 
 
