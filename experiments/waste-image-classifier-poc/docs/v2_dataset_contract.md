@@ -12,6 +12,10 @@ The existing TrashNet manifest remains the baseline. Its `train`, `validation`, 
 
 This keeps validation and test comparable to the original POC and prevents new, inspected, or weakly mapped examples from silently entering model-selection splits.
 
+Raw source manifests are immutable historical records. V2 assembly may exclude source rows during curation, but it must not relabel, move, or rewrite the original source manifest or its split assignments.
+
+Byte-identical TrashNet images with contradictory material labels are quarantined rather than automatically relabelled. All occurrences in a conflicting-label SHA-256 group are excluded from V2 classification output, and `v2_trashnet_quarantine_report.csv` records each excluded occurrence as part of the V2 provenance record.
+
 Enrichment sources must not reuse immutable TrashNet validation or test identities. The builder checks matching non-empty SHA-256 values, matching image IDs, and matching relative paths when the source dataset context is the same.
 
 ## Two Datasets, Two Label Spaces
