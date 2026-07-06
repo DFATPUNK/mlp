@@ -1,0 +1,7 @@
+feedback_id,image_id,relative_path,source,source_split,model_version,predicted_label,calibrated_confidence,original_decision,original_threshold,human_outcome,confirmed_label,auto_route_eligible,review_reason,approved_for_classifier_training,approved_for_gate_training,annotation_notes
+fb_template_001,img_template_001,images/clear_plastic_bottle.jpg,workflow_feedback,workflow_feedback,poc_model_v0,plastic,0.94,auto_route,0.90,confirmed,plastic,true,none,true,true,clear single plastic bottle
+fb_template_002,img_template_002,images/corrected_paper_cup.jpg,workflow_feedback,workflow_feedback,poc_model_v0,plastic,0.81,needs_review,0.90,corrected,paper,true,wrong_material,true,true,clear single item corrected by reviewer
+fb_template_003,img_template_003,images/multiple_items.jpg,manual_capture,manual_capture,poc_model_v0,metal,0.72,needs_review,0.90,rejected,,false,multiple_objects,false,true,multiple objects in one scene
+fb_template_004,img_template_004,images/unsupported_object.jpg,manual_capture,manual_capture,poc_model_v0,trash,0.67,needs_review,0.90,rejected,,false,unsupported_material,false,true,not one of the six supported material classes
+fb_template_005,img_template_005,images/too_dark.jpg,public_dataset,public_dataset,poc_model_v0,glass,0.55,needs_review,0.90,rejected,,false,low_quality,false,true,too dark for automatic routing
+fb_template_006,img_template_006,images/unresolved_review.jpg,external_diagnostic,external_diagnostic_v1,poc_model_v0,cardboard,0.62,needs_review,0.90,unresolved,,false,other,false,false,pending reviewer decision

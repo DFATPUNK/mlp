@@ -1,0 +1,4 @@
+public_row_id,source_dataset_id,source_item_id,relative_path,auto_route_eligible,review_reason,annotation_type,object_count,approved_for_gate_training,annotation_notes
+pub_gate_001,fictional_public_v1,item_001,ingested/fictional_public_v1/item_001.jpg,true,none,single_object,1,true,fictional clear single object
+pub_gate_002,fictional_public_v1,item_010,ingested/fictional_public_v1/item_010.jpg,false,multiple_objects,scene,3,true,fictional multi-object review example
+pub_gate_003,fictional_public_v1,item_011,ingested/fictional_public_v1/item_011.jpg,false,unsupported_material,single_object,1,true,fictional unsupported material example

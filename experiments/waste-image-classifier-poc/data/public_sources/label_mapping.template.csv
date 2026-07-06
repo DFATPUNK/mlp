@@ -1,0 +1,5 @@
+mapping_rule_id,source_dataset_id,source_label,mapped_label,mapping_status,rationale
+map_fictional_plastic_bottle,fictional_public_v1,clear plastic bottle,plastic,approved,Fictional example where reviewed source label maps to the TrashNet plastic class.
+map_fictional_cardboard_box,fictional_public_v1,cardboard box,cardboard,approved,Fictional example where reviewed source label maps to the TrashNet cardboard class.
+map_fictional_banana_excluded,fictional_public_v1,banana peel,,excluded,Fictional unsupported organic-waste source label excluded from six-class classifier training.
+map_fictional_mixed_scene_review,fictional_public_v1,mixed waste scene,,needs_review,Fictional scene label requiring human review before any material mapping.
