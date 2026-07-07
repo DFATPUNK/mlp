@@ -1,0 +1,4 @@
+mapping_rule_id,source_dataset_id,source_label,mapped_label,mapping_status,rationale
+taco_example_plastic_bottle,taco,example plastic bottle,plastic,approved,fictional example of a single in-scope material mapping
+taco_example_banana_peel,taco,example banana peel,,excluded,fictional unsupported source category for the six-class material classifier
+taco_example_mixed_litter,taco,example mixed litter,,needs_review,fictional broad category requiring review before any future mapping

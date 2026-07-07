@@ -284,3 +284,20 @@ python scripts/build_v2_dataset.py \
 ```
 
 The builder blocks `external_diagnostic_v1` by default, even when supplied through Phase 0.7 candidate CSVs. Use `--allow-promoted-external-diagnostic` only when intentionally retiring that diagnostic set from future comparative or final evaluation.
+
+## Phase 0.8.2 TACO intake review queue
+
+Phase 0.8.2 adds a local TACO intake workflow for future public-source review. It does not download TACO, approve public images for training, or assemble V2 automatically. See `docs/taco_intake_contract.md` and `docs/taco_review_workflow.md`.
+
+Prepare a local review queue after manually downloading TACO into ignored paths:
+
+```bash
+python scripts/prepare_taco_intake.py \
+  --annotations data/public_sources/ingested/taco/annotations.json \
+  --image-root data/public_sources/ingested/taco/images \
+  --label-mapping data/public_sources/taco_label_mapping.csv \
+  --output-dir data/public_sources/taco/review_outputs/local_run \
+  --min-object-area-ratio 0.20
+```
+
+The generated TACO classifier and gate candidates are drafts with training approval set to `false`. Public rows can enter V2 only after human review sets `license_status=approved`, supplies licence and attribution provenance, and explicitly approves the relevant training target.

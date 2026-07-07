@@ -109,6 +109,13 @@ def public_classifier_row(**overrides) -> dict[str, str]:
         "source_dataset_id": "fictional_public_v1",
         "source_item_id": "item_1",
         "relative_path": "ingested/fictional_public_v1/item_1.jpg",
+        "source_url": "https://example.test/fictional_public_v1/item_1",
+        "source_license": "CC BY 4.0",
+        "source_license_reference": "https://creativecommons.org/licenses/by/4.0/",
+        "source_attribution": "Fictional Public Dataset item_1",
+        "license_status": "approved",
+        "source_annotation_id": "ann_1",
+        "object_area_ratio": "0.42",
         "source_label": "plastic bottle",
         "mapped_label": "plastic",
         "mapping_rule_id": "map_plastic_bottle",
@@ -127,6 +134,13 @@ def public_gate_row(**overrides) -> dict[str, str]:
         "source_dataset_id": "fictional_public_v1",
         "source_item_id": "gate_item_1",
         "relative_path": "ingested/fictional_public_v1/gate_item_1.jpg",
+        "source_url": "https://example.test/fictional_public_v1/gate_item_1",
+        "source_license": "CC BY 4.0",
+        "source_license_reference": "https://creativecommons.org/licenses/by/4.0/",
+        "source_attribution": "Fictional Public Dataset gate_item_1",
+        "license_status": "approved",
+        "source_annotation_id": "ann_gate_1",
+        "object_area_ratio": "0.34",
         "auto_route_eligible": "false",
         "review_reason": "multiple_objects",
         "annotation_type": "scene",
@@ -332,6 +346,34 @@ class V2DatasetTests(unittest.TestCase):
         self.assertEqual(public_rows[0]["label"], "plastic")
         self.assertEqual(public_rows[0]["original_label"], "plastic bottle")
         self.assertEqual(public_rows[0]["mapping_rule_id"], "map_plastic_bottle")
+        self.assertEqual(public_rows[0]["source_url"], "https://example.test/fictional_public_v1/item_1")
+        self.assertEqual(public_rows[0]["source_license"], "CC BY 4.0")
+        self.assertEqual(public_rows[0]["source_license_reference"], "https://creativecommons.org/licenses/by/4.0/")
+        self.assertEqual(public_rows[0]["source_attribution"], "Fictional Public Dataset item_1")
+        self.assertEqual(public_rows[0]["license_status"], "approved")
+        self.assertEqual(public_rows[0]["source_annotation_id"], "ann_1")
+        self.assertEqual(public_rows[0]["object_area_ratio"], "0.42")
+
+    def test_public_training_rows_require_approved_license_status(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            paths = self.make_inputs(
+                Path(tmp_dir),
+                public_classifier_rows=[public_classifier_row(license_status="eligible_for_review")],
+                mapping_rows=[mapping_row()],
+            )
+
+            with self.assertRaisesRegex(V2DatasetError, "license_status=approved"):
+                self.build(paths, public_classifier_manifest=paths["public_classifier"], label_mapping=paths["mapping"])
+
+    def test_public_training_rows_require_license_provenance(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            paths = self.make_inputs(
+                Path(tmp_dir),
+                public_gate_rows=[public_gate_row(source_attribution="")],
+            )
+
+            with self.assertRaisesRegex(V2DatasetError, "nonblank licence provenance"):
+                self.build(paths, public_gate_manifest=paths["public_gate"])
 
     def test_same_sha256_from_different_sources_with_conflicting_labels_fails(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
