@@ -6,7 +6,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from waste_poc.taco_intake import prepare_taco_intake
+from waste_poc.taco_intake import TACO_LICENSE_REFERENCE, TACO_MISSING_LICENSE_RESOLUTION_RULE, TACO_RESOLVED_LICENSE, prepare_taco_intake, resolve_image_license
 from waste_poc.v2_dataset import LABEL_MAPPING_COLUMNS, PUBLIC_CLASSIFIER_COLUMNS, PUBLIC_GATE_COLUMNS
 
 
@@ -107,6 +107,27 @@ class TacoIntakeTests(unittest.TestCase):
         )
         return report, output_dir
 
+    def run_plan_only(
+        self,
+        tmp: Path,
+        *,
+        payload: dict,
+        mapping_rows: list[dict[str, str]],
+        min_object_area_ratio: float = 0.20,
+    ) -> tuple[dict, Path]:
+        annotations_path = write_annotations(tmp / "annotations.json", payload)
+        mapping_path = write_csv(tmp / "label_mapping.csv", LABEL_MAPPING_COLUMNS, mapping_rows)
+        output_dir = tmp / "out"
+        report = prepare_taco_intake(
+            annotations=annotations_path,
+            image_root=None,
+            label_mapping=mapping_path,
+            output_dir=output_dir,
+            min_object_area_ratio=min_object_area_ratio,
+            plan_only=True,
+        )
+        return report, output_dir
+
     def test_category_inventory_is_deterministic_and_includes_mapped_and_unmapped_categories(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             tmp = Path(tmp_dir)
@@ -151,6 +172,71 @@ class TacoIntakeTests(unittest.TestCase):
         self.assertEqual(gate_rows[0]["review_reason"], "none")
         self.assertEqual(gate_rows[0]["approved_for_gate_training"], "false")
 
+    def test_blank_taco_license_with_source_url_resolves_to_cc_by_for_review_only(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp = Path(tmp_dir)
+            payload = base_payload(
+                images=[image_row(1, "blank.jpg", license=None)],
+                annotations=[annotation_row(10, 1, 1)],
+                licenses=[],
+            )
+            report, output_dir = self.run_plan_only(tmp, payload=payload, mapping_rows=[mapping_row()])
+
+            ledger_rows = read_csv(output_dir / "taco_license_resolution.csv")
+
+        self.assertEqual(report["images_with_eligible_licence"], 1)
+        self.assertEqual(ledger_rows[0]["raw_license"], "")
+        self.assertEqual(ledger_rows[0]["resolved_license"], TACO_RESOLVED_LICENSE)
+        self.assertEqual(ledger_rows[0]["source_license_reference"], TACO_LICENSE_REFERENCE)
+        self.assertEqual(ledger_rows[0]["license_status"], "eligible_for_review")
+        self.assertEqual(ledger_rows[0]["resolution_rule"], TACO_MISSING_LICENSE_RESOLUTION_RULE)
+
+    def test_blank_taco_license_without_source_url_remains_blocked(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp = Path(tmp_dir)
+            payload = base_payload(
+                images=[image_row(1, "blank_no_url.jpg", license=None, flickr_url="")],
+                annotations=[annotation_row(10, 1, 1)],
+                licenses=[],
+            )
+            _, output_dir = self.run_plan_only(tmp, payload=payload, mapping_rows=[mapping_row()])
+
+            ledger_rows = read_csv(output_dir / "taco_license_resolution.csv")
+
+        self.assertEqual(ledger_rows[0]["license_status"], "blocked")
+        self.assertEqual(ledger_rows[0]["resolved_license"], "")
+        self.assertIn("missing original source URL", ledger_rows[0]["resolution_notes"])
+
+    def test_explicit_cc_and_odbl_license_values_remain_blocked(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp = Path(tmp_dir)
+            payload = base_payload(
+                images=[
+                    image_row(1, "cc.jpg", license="CC"),
+                    image_row(2, "odbl.jpg", license="ODBL (c) OpenLitterMap & Contributors"),
+                ],
+                annotations=[annotation_row(10, 1, 1), annotation_row(11, 2, 1)],
+                licenses=[],
+            )
+            _, output_dir = self.run_plan_only(tmp, payload=payload, mapping_rows=[mapping_row()])
+
+            ledger_rows = read_csv(output_dir / "taco_license_resolution.csv")
+
+        statuses = {row["source_item_id"]: row for row in ledger_rows}
+        self.assertEqual(statuses["1"]["raw_license"], "CC")
+        self.assertEqual(statuses["1"]["license_status"], "blocked")
+        self.assertIn("not specific enough", statuses["1"]["resolution_notes"])
+        self.assertEqual(statuses["2"]["raw_license"], "ODBL (c) OpenLitterMap & Contributors")
+        self.assertEqual(statuses["2"]["license_status"], "blocked")
+        self.assertIn("ODBL", statuses["2"]["resolution_notes"])
+
+    def test_blank_license_resolution_rule_does_not_apply_to_non_taco_dataset(self):
+        record = resolve_image_license(image_row(1, "other.jpg", license=None), {}, source_dataset_id="other_public")
+
+        self.assertEqual(record["license_status"], "blocked")
+        self.assertEqual(record["resolved_license"], "")
+        self.assertEqual(record["resolution_rule"], "")
+
     def test_multi_object_image_creates_only_gate_draft_with_multiple_objects(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             tmp = Path(tmp_dir)
@@ -173,6 +259,75 @@ class TacoIntakeTests(unittest.TestCase):
         self.assertEqual(gate_rows[0]["auto_route_eligible"], "false")
         self.assertEqual(gate_rows[0]["review_reason"], "multiple_objects")
         self.assertEqual(gate_rows[0]["object_count"], "2")
+
+    def test_plan_only_writes_inventory_ledger_and_plan_without_candidate_files_or_image_root(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp = Path(tmp_dir)
+            payload = base_payload(
+                images=[image_row(1, "planned.jpg", license=None)],
+                annotations=[annotation_row(10, 1, 1)],
+                licenses=[],
+            )
+            report, output_dir = self.run_plan_only(tmp, payload=payload, mapping_rows=[mapping_row()])
+            inventory_exists = (output_dir / "taco_category_inventory.csv").is_file()
+            ledger_exists = (output_dir / "taco_license_resolution.csv").is_file()
+            plan_exists = (output_dir / "taco_download_plan.csv").is_file()
+            classifier_exists = (output_dir / "taco_classifier_candidates.draft.csv").exists()
+            gate_exists = (output_dir / "taco_gate_candidates.draft.csv").exists()
+
+        self.assertEqual(report["download_plan_rows"], 1)
+        self.assertTrue(inventory_exists)
+        self.assertTrue(ledger_exists)
+        self.assertTrue(plan_exists)
+        self.assertFalse(classifier_exists)
+        self.assertFalse(gate_exists)
+
+    def test_plan_only_roles_are_generated_for_mapped_reviewable_images(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp = Path(tmp_dir)
+            payload = base_payload(
+                images=[
+                    image_row(1, "single.jpg", license=None),
+                    image_row(2, "multi.jpg", license=None),
+                    image_row(3, "excluded.jpg", license=None),
+                    image_row(4, "unmapped.jpg", license=None),
+                    image_row(5, "small.jpg", license=None),
+                ],
+                annotations=[
+                    annotation_row(10, 1, 1, [0, 0, 60, 60]),
+                    annotation_row(20, 2, 1, [0, 0, 50, 50]),
+                    annotation_row(21, 2, 2, [10, 10, 40, 40]),
+                    annotation_row(30, 3, 3, [0, 0, 50, 50]),
+                    annotation_row(40, 4, 4, [0, 0, 50, 50]),
+                    annotation_row(50, 5, 1, [0, 0, 5, 5]),
+                ],
+                licenses=[],
+            )
+            _, output_dir = self.run_plan_only(
+                tmp,
+                payload=payload,
+                mapping_rows=[
+                    mapping_row(),
+                    mapping_row(mapping_rule_id="map_metal", source_label="metal can", mapped_label="metal"),
+                    mapping_row(mapping_rule_id="map_banana", source_label="banana peel", mapped_label="", mapping_status="excluded"),
+                ],
+            )
+
+            plan_rows = read_csv(output_dir / "taco_download_plan.csv")
+
+        rows_by_item = {row["source_item_id"]: row for row in plan_rows}
+        self.assertEqual(set(rows_by_item), {"1", "2", "3", "5"})
+        self.assertEqual(rows_by_item["1"]["proposed_classifier_role"], "classifier_and_gate_candidate")
+        self.assertEqual(rows_by_item["1"]["proposed_gate_value"], "true")
+        self.assertEqual(rows_by_item["1"]["proposed_review_reason"], "none")
+        self.assertEqual(rows_by_item["2"]["proposed_classifier_role"], "gate_only")
+        self.assertEqual(rows_by_item["2"]["proposed_gate_value"], "false")
+        self.assertEqual(rows_by_item["2"]["proposed_review_reason"], "multiple_objects")
+        self.assertEqual(rows_by_item["3"]["proposed_classifier_role"], "gate_only")
+        self.assertEqual(rows_by_item["3"]["proposed_review_reason"], "unsupported_material")
+        self.assertEqual(rows_by_item["5"]["proposed_classifier_role"], "gate_only")
+        self.assertEqual(rows_by_item["5"]["proposed_review_reason"], "ambiguous_scene")
+        self.assertTrue(all(row["plan_status"] == "eligible_for_manual_download" for row in plan_rows))
 
     def test_excluded_mapping_creates_gate_false_unsupported_material_not_classifier(self):
         with tempfile.TemporaryDirectory() as tmp_dir:

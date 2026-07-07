@@ -12,6 +12,9 @@ from .utils import CLASS_NAMES, ensure_dir, write_json, write_text
 from .v2_dataset import LABEL_MAPPING_COLUMNS, PUBLIC_CLASSIFIER_COLUMNS, PUBLIC_GATE_COLUMNS
 
 SOURCE_DATASET_ID = "taco"
+TACO_RESOLVED_LICENSE = "CC BY 4.0"
+TACO_LICENSE_REFERENCE = "https://tacodataset.org/"
+TACO_MISSING_LICENSE_RESOLUTION_RULE = "taco_missing_license_default_cc_by_4_0"
 SOURCE_URL_FIELDS = ["flickr_url", "flickr_640_url", "url", "coco_url"]
 BLOCKED_LICENSE_PATTERNS = [
     re.compile(r"(^|[^A-Z0-9])NC([^A-Z0-9]|$)", re.IGNORECASE),
@@ -19,6 +22,8 @@ BLOCKED_LICENSE_PATTERNS = [
     re.compile(r"non[- ]commercial", re.IGNORECASE),
     re.compile(r"no derivatives", re.IGNORECASE),
 ]
+AMBIGUOUS_LICENSE_VALUES = {"CC"}
+BLOCKED_LICENSE_MARKERS = {"ODBL"}
 
 CATEGORY_INVENTORY_COLUMNS = [
     "source_dataset_id",
@@ -42,6 +47,42 @@ EXCLUDED_ROWS_COLUMNS = [
     "source_url",
     "source_license",
     "source_license_reference",
+]
+
+LICENSE_RESOLUTION_COLUMNS = [
+    "source_dataset_id",
+    "source_item_id",
+    "relative_path",
+    "source_url",
+    "raw_license",
+    "resolved_license",
+    "source_license_reference",
+    "source_attribution",
+    "license_status",
+    "resolution_rule",
+    "resolution_notes",
+]
+
+DOWNLOAD_PLAN_COLUMNS = [
+    "plan_id",
+    "source_dataset_id",
+    "source_item_id",
+    "relative_path",
+    "source_url",
+    "source_license",
+    "source_license_reference",
+    "source_attribution",
+    "license_status",
+    "resolution_rule",
+    "annotation_count",
+    "source_labels",
+    "mapped_labels",
+    "object_area_ratio",
+    "proposed_classifier_role",
+    "proposed_gate_value",
+    "proposed_review_reason",
+    "plan_status",
+    "plan_notes",
 ]
 
 
@@ -123,6 +164,10 @@ def _license_text_is_blocked(*values: str) -> bool:
     return any(pattern.search(text) for pattern in BLOCKED_LICENSE_PATTERNS)
 
 
+def _license_text_has_marker(marker: str, *values: str) -> bool:
+    return marker.casefold() in " ".join(value for value in values if value).casefold()
+
+
 def _license_lookup(licenses: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
     return {_string_id(license_item.get("id")): license_item for license_item in licenses if _string_id(license_item.get("id"))}
 
@@ -153,22 +198,91 @@ def _source_attribution(image: dict[str, Any], source_url: str) -> str:
     return f"TACO image {image_id}; source {source_url}" if image_id and source_url else ""
 
 
-def _resolve_license(image: dict[str, Any], licenses_by_id: dict[str, dict[str, Any]]) -> tuple[str, str, str, str, str]:
+def _raw_license_value(image: dict[str, Any]) -> str:
+    value = image.get("license")
+    if value is None:
+        return ""
+    return str(value).strip()
+
+
+def _taco_default_attribution(source_url: str) -> str:
+    return f"TACO Dataset; original image URL: {source_url}; licence resolved under TACO missing-licence default rule."
+
+
+def resolve_image_license(image: dict[str, Any], licenses_by_id: dict[str, dict[str, Any]], source_dataset_id: str = SOURCE_DATASET_ID) -> dict[str, str]:
     source_url = _source_url(image)
-    image_license_id = _string_id(image.get("license"))
-    license_item = licenses_by_id.get(image_license_id)
-    source_license = _source_license(license_item, image_license_id)
+    raw_license = _raw_license_value(image)
+    license_item = licenses_by_id.get(raw_license)
+    source_license = _source_license(license_item, raw_license)
     source_license_reference = _license_reference(license_item)
     source_attribution = _source_attribution(image, source_url)
+    image_id = _string_id(image.get("id"))
+    relative_path = str(image.get("file_name", "") or "").strip()
+    record = {
+        "source_dataset_id": source_dataset_id,
+        "source_item_id": image_id,
+        "relative_path": relative_path,
+        "source_url": source_url,
+        "raw_license": raw_license,
+        "resolved_license": "",
+        "source_license": source_license,
+        "source_license_reference": source_license_reference,
+        "source_attribution": source_attribution,
+        "license_status": "blocked",
+        "resolution_rule": "",
+        "resolution_notes": "",
+    }
     if not source_url:
-        return "blocked", source_url, source_license, source_license_reference, source_attribution
-    if not image_license_id or not source_license or not source_license_reference:
-        return "blocked", source_url, source_license, source_license_reference, source_attribution
+        record["resolution_notes"] = "blocked: missing original source URL"
+        return record
+    if raw_license == "" and source_dataset_id == SOURCE_DATASET_ID:
+        record.update(
+            {
+                "resolved_license": TACO_RESOLVED_LICENSE,
+                "source_license": TACO_RESOLVED_LICENSE,
+                "source_license_reference": TACO_LICENSE_REFERENCE,
+                "source_attribution": _taco_default_attribution(source_url),
+                "license_status": "eligible_for_review",
+                "resolution_rule": TACO_MISSING_LICENSE_RESOLUTION_RULE,
+                "resolution_notes": "eligible_for_review only: blank TACO licence resolved from official TACO Terms default; human review still required",
+            }
+        )
+        return record
+    if raw_license == "":
+        record["resolution_notes"] = "blocked: missing licence has no dataset-specific resolution rule"
+        return record
+    explicit_license_text = source_license or raw_license
+    if raw_license.upper() in AMBIGUOUS_LICENSE_VALUES or explicit_license_text.upper() in AMBIGUOUS_LICENSE_VALUES:
+        record["source_license"] = explicit_license_text
+        record["resolution_notes"] = "blocked: explicit CC metadata is not specific enough for automatic intake"
+        return record
+    if any(_license_text_has_marker(marker, raw_license, explicit_license_text) for marker in BLOCKED_LICENSE_MARKERS):
+        record["source_license"] = explicit_license_text
+        record["resolution_notes"] = "blocked: ODBL metadata remains insufficient for automatic intake"
+        return record
+    if not source_license or not source_license_reference:
+        record["source_license"] = explicit_license_text
+        record["resolution_notes"] = "blocked: licence metadata is missing, incomplete, or unresolvable"
+        return record
     if not source_attribution:
-        return "blocked", source_url, source_license, source_license_reference, source_attribution
-    if _license_text_is_blocked(source_license, source_license_reference):
-        return "blocked", source_url, source_license, source_license_reference, source_attribution
-    return "eligible_for_review", source_url, source_license, source_license_reference, source_attribution
+        record["resolution_notes"] = "blocked: source attribution could not be generated"
+        return record
+    if _license_text_is_blocked(raw_license, source_license, source_license_reference):
+        record["resolution_notes"] = "blocked: licence text contains non-commercial or no-derivatives restrictions"
+        return record
+    record["license_status"] = "eligible_for_review"
+    record["resolution_notes"] = "eligible_for_review: explicit licence metadata and source provenance are present; human review still required"
+    return record
+
+
+def _license_fields(record: dict[str, str]) -> tuple[str, str, str, str, str]:
+    return (
+        record["license_status"],
+        record["source_url"],
+        record.get("source_license", "") or record.get("resolved_license", "") or record.get("raw_license", ""),
+        record["source_license_reference"],
+        record["source_attribution"],
+    )
 
 
 def _mapping_by_label(rows: list[dict[str, str]]) -> dict[str, dict[str, str]]:
@@ -351,6 +465,103 @@ def _category_inventory(
     return rows
 
 
+def _mapped_annotation_rows(
+    annotations: list[dict[str, Any]],
+    categories_by_id: dict[str, dict[str, Any]],
+    mappings: dict[str, dict[str, str]],
+) -> list[tuple[dict[str, Any], str, dict[str, str]]]:
+    rows = []
+    for annotation in annotations:
+        category = categories_by_id.get(_string_id(annotation.get("category_id")), {})
+        source_label = _category_label(category)
+        mapping = mappings.get(source_label)
+        if mapping is not None:
+            rows.append((annotation, source_label, mapping))
+    return rows
+
+
+def _mapped_labels(mapped_rows: list[tuple[dict[str, Any], str, dict[str, str]]]) -> list[str]:
+    labels = []
+    for _, _, mapping in mapped_rows:
+        mapped_label = mapping.get("mapped_label", "")
+        labels.append(mapped_label or f"{mapping.get('mapping_status', '')}:{mapping.get('source_label', '')}")
+    return sorted({label for label in labels if label})
+
+
+def _download_plan_row(
+    *,
+    image: dict[str, Any],
+    annotations: list[dict[str, Any]],
+    categories_by_id: dict[str, dict[str, Any]],
+    mappings: dict[str, dict[str, str]],
+    license_record: dict[str, str],
+    min_object_area_ratio: float,
+) -> dict[str, str] | None:
+    if license_record["license_status"] != "eligible_for_review" or not license_record["source_url"]:
+        return None
+    if not annotations:
+        return None
+    mapped_rows = _mapped_annotation_rows(annotations, categories_by_id, mappings)
+    if not mapped_rows:
+        return None
+
+    ratios = [_object_area_ratio(annotation, image) for annotation in annotations]
+    max_ratio = max(ratios, default=0.0)
+    source_labels = _source_labels(annotations, categories_by_id)
+    proposed_classifier_role = ""
+    proposed_gate_value = ""
+    proposed_review_reason = ""
+    plan_notes = "manual download and human review required; no training approval generated"
+
+    if len(annotations) > 1:
+        proposed_classifier_role = "gate_only"
+        proposed_gate_value = "false"
+        proposed_review_reason = "multiple_objects"
+    else:
+        annotation, _, mapping = mapped_rows[0]
+        ratio = _object_area_ratio(annotation, image)
+        max_ratio = ratio
+        if mapping["mapping_status"] == "approved" and mapping["mapped_label"] in CLASS_NAMES:
+            if ratio >= min_object_area_ratio:
+                proposed_classifier_role = "classifier_and_gate_candidate"
+                proposed_gate_value = "true"
+                proposed_review_reason = "none"
+            else:
+                proposed_classifier_role = "gate_only"
+                proposed_gate_value = "false"
+                proposed_review_reason = "ambiguous_scene"
+        elif mapping["mapping_status"] in {"excluded", "needs_review"}:
+            proposed_classifier_role = "gate_only"
+            proposed_gate_value = "false"
+            proposed_review_reason = "unsupported_material"
+        else:
+            return None
+
+    image_id = _string_id(image.get("id"))
+    relative_path = str(image.get("file_name", "") or "").strip()
+    return {
+        "plan_id": _stable_id("taco_plan", image_id, relative_path, proposed_classifier_role, proposed_review_reason),
+        "source_dataset_id": SOURCE_DATASET_ID,
+        "source_item_id": image_id,
+        "relative_path": relative_path,
+        "source_url": license_record["source_url"],
+        "source_license": license_record.get("source_license", "") or license_record.get("resolved_license", "") or license_record.get("raw_license", ""),
+        "source_license_reference": license_record["source_license_reference"],
+        "source_attribution": license_record["source_attribution"],
+        "license_status": license_record["license_status"],
+        "resolution_rule": license_record["resolution_rule"],
+        "annotation_count": str(len(annotations)),
+        "source_labels": ";".join(source_labels),
+        "mapped_labels": ";".join(_mapped_labels(mapped_rows)),
+        "object_area_ratio": _format_ratio(max_ratio),
+        "proposed_classifier_role": proposed_classifier_role,
+        "proposed_gate_value": proposed_gate_value,
+        "proposed_review_reason": proposed_review_reason,
+        "plan_status": "eligible_for_manual_download",
+        "plan_notes": plan_notes,
+    }
+
+
 def _gallery_html(output_dir: Path, image_root: Path, rows: list[dict[str, str]]) -> str:
     body = [
         "<!doctype html>",
@@ -382,13 +593,16 @@ def _gallery_html(output_dir: Path, image_root: Path, rows: list[dict[str, str]]
 def prepare_taco_intake(
     *,
     annotations: str | Path,
-    image_root: str | Path,
+    image_root: str | Path | None,
     label_mapping: str | Path,
     output_dir: str | Path,
     min_object_area_ratio: float,
+    plan_only: bool = False,
 ) -> dict:
     if min_object_area_ratio < 0 or min_object_area_ratio > 1:
         raise TacoIntakeError(["--min-object-area-ratio must be in [0, 1]"])
+    if not plan_only and image_root is None:
+        raise TacoIntakeError(["--image-root is required unless --plan-only is used"])
 
     payload = _load_json(annotations)
     images = _require_list(payload, "images")
@@ -418,11 +632,13 @@ def prepare_taco_intake(
         annotations_by_category[category_id].append(annotation)
 
     output_dir = ensure_dir(output_dir)
-    image_root = Path(image_root)
+    image_root_path = Path(image_root) if image_root is not None else None
     licenses_by_id = _license_lookup(licenses)
     classifier_rows: list[dict[str, str]] = []
     gate_rows: list[dict[str, str]] = []
     excluded_rows: list[dict[str, str]] = []
+    license_resolution_rows: list[dict[str, str]] = []
+    download_plan_rows: list[dict[str, str]] = []
 
     images_with_single_annotation = 0
     images_with_multiple_annotations = 0
@@ -436,8 +652,20 @@ def prepare_taco_intake(
             raise TacoIntakeError([f"image {image_id}: file_name is required"])
         image_annotations = sorted(annotations_by_image.get(image_id, []), key=lambda item: _string_id(item.get("id")))
         source_labels = _source_labels(image_annotations, categories_by_id)
-        license_fields = _resolve_license(image, licenses_by_id)
-        license_status = license_fields[0]
+        license_record = resolve_image_license(image, licenses_by_id, SOURCE_DATASET_ID)
+        license_resolution_rows.append({column: license_record.get(column, "") for column in LICENSE_RESOLUTION_COLUMNS})
+        plan_row = _download_plan_row(
+            image=image,
+            annotations=image_annotations,
+            categories_by_id=categories_by_id,
+            mappings=mappings,
+            license_record=license_record,
+            min_object_area_ratio=min_object_area_ratio,
+        )
+        if plan_row is not None:
+            download_plan_rows.append(plan_row)
+        license_fields = _license_fields(license_record)
+        license_status = license_record["license_status"]
         if len(image_annotations) == 1:
             images_with_single_annotation += 1
         elif len(image_annotations) > 1:
@@ -447,9 +675,13 @@ def prepare_taco_intake(
         else:
             images_blocked_by_licence += 1
         if license_status != "eligible_for_review":
+            if plan_only:
+                continue
             excluded_rows.append(_excluded_row(reason="blocked_license", image=image, relative_path=relative_path, source_labels=source_labels, license_fields=license_fields))
             continue
-        if not _local_image_exists(image_root, relative_path):
+        if plan_only:
+            continue
+        if image_root_path is None or not _local_image_exists(image_root_path, relative_path):
             excluded_rows.append(_excluded_row(reason="missing_local_image", image=image, relative_path=relative_path, source_labels=source_labels, license_fields=license_fields))
             continue
         if not image_annotations:
@@ -549,11 +781,18 @@ def prepare_taco_intake(
     for row in gate_rows:
         gallery_rows.append(row)
 
+    license_resolution_rows = sorted(license_resolution_rows, key=lambda row: row["source_item_id"])
+    download_plan_rows = sorted(download_plan_rows, key=lambda row: row["source_item_id"])
     _write_csv(output_dir / "taco_category_inventory.csv", CATEGORY_INVENTORY_COLUMNS, inventory_rows)
-    _write_csv(output_dir / "taco_classifier_candidates.draft.csv", PUBLIC_CLASSIFIER_COLUMNS, classifier_rows)
-    _write_csv(output_dir / "taco_gate_candidates.draft.csv", PUBLIC_GATE_COLUMNS, gate_rows)
-    _write_csv(output_dir / "taco_excluded_rows.csv", EXCLUDED_ROWS_COLUMNS, excluded_rows)
-    write_text(output_dir / "taco_review_gallery.html", _gallery_html(output_dir, image_root, gallery_rows))
+    _write_csv(output_dir / "taco_license_resolution.csv", LICENSE_RESOLUTION_COLUMNS, license_resolution_rows)
+    if plan_only:
+        _write_csv(output_dir / "taco_download_plan.csv", DOWNLOAD_PLAN_COLUMNS, download_plan_rows)
+    else:
+        assert image_root_path is not None
+        _write_csv(output_dir / "taco_classifier_candidates.draft.csv", PUBLIC_CLASSIFIER_COLUMNS, classifier_rows)
+        _write_csv(output_dir / "taco_gate_candidates.draft.csv", PUBLIC_GATE_COLUMNS, gate_rows)
+        _write_csv(output_dir / "taco_excluded_rows.csv", EXCLUDED_ROWS_COLUMNS, excluded_rows)
+        write_text(output_dir / "taco_review_gallery.html", _gallery_html(output_dir, image_root_path, gallery_rows))
 
     report = {
         "total_images": len(images),
@@ -566,7 +805,10 @@ def prepare_taco_intake(
         "classifier_draft_rows": len(classifier_rows),
         "gate_draft_rows": len(gate_rows),
         "excluded_rows": len(excluded_rows),
+        "license_resolution_rows": len(license_resolution_rows),
+        "download_plan_rows": len(download_plan_rows),
         "min_object_area_ratio": min_object_area_ratio,
+        "plan_only": plan_only,
     }
     write_json(output_dir / "taco_intake_report.json", report)
     return report
