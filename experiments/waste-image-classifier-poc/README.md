@@ -311,7 +311,21 @@ python scripts/prepare_taco_intake.py \
 
 For TACO only, blank licence entries may become `eligible_for_review` under the official TACO missing-licence default rule. This is not training approval. Explicit `CC` and `ODBL` metadata remain blocked.
 
-After manual download and human review, run normal local intake:
+Build a small deterministic review batch from the plan:
+
+```bash
+python scripts/build_taco_review_batch.py \
+  --download-plan data/public_sources/taco/review_outputs/plan_local/taco_download_plan.csv \
+  --output-dir data/public_sources/taco/review_outputs/batch_local \
+  --seed phase_0_8_4 \
+  --multiple-objects-limit 24 \
+  --ambiguous-scene-limit 14 \
+  --unsupported-material-limit 9
+```
+
+The batch is a review/download queue, not training data. It keeps all eligible classifier-and-gate rows and deterministically samples limited gate-only rows for visual review.
+
+After manual download and human review of selected rows, run normal local intake:
 
 ```bash
 python scripts/prepare_taco_intake.py \

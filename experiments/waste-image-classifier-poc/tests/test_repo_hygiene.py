@@ -16,6 +16,7 @@ class RepoHygieneTests(unittest.TestCase):
         }
 
         self.assertIn("data/public_sources/taco_label_mapping.csv", ignore_lines)
+        self.assertIn("data/public_sources/taco/review_outputs/", ignore_lines)
         self.assertIn("data/public_sources/taco/taco_license_resolution.csv", ignore_lines)
         self.assertIn("data/public_sources/taco/taco_download_plan.csv", ignore_lines)
         self.assertTrue((POC_ROOT / "data/public_sources/taco_label_mapping.template.csv").is_file())
