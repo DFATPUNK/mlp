@@ -17,7 +17,7 @@ Do not assume a public label means the same thing as a TrashNet material class. 
 
 Public-source candidate rows also preserve licence and attribution evidence: `source_url`, `source_license`, `source_license_reference`, `source_attribution`, `license_status`, `source_annotation_id`, and `object_area_ratio`. V2 assembly accepts public training rows only after human review sets `license_status=approved` and the relevant `approved_for_*_training` field to `true`.
 
-For TACO-specific local intake, see `taco_intake_contract.md` and `taco_review_workflow.md`. The TACO script produces review drafts only; it never marks rows as approved.
+For TACO-specific local intake, see `taco_intake_contract.md` and `taco_review_workflow.md`. The TACO script can first produce a plan-only licence ledger and manual download queue without local images. For TACO only, blank licence entries can become `eligible_for_review` under the official TACO missing-licence default rule; explicit `CC` and `ODBL` metadata remain blocked. The TACO script produces review drafts only; it never marks rows as approved.
 
 ## Local Data
 

@@ -285,9 +285,9 @@ python scripts/build_v2_dataset.py \
 
 The builder blocks `external_diagnostic_v1` by default, even when supplied through Phase 0.7 candidate CSVs. Use `--allow-promoted-external-diagnostic` only when intentionally retiring that diagnostic set from future comparative or final evaluation.
 
-## Phase 0.8.2 TACO intake review queue
+## Phase 0.8.2/0.8.3 TACO intake review queue
 
-Phase 0.8.2 adds a local TACO intake workflow for future public-source review. It does not download TACO, approve public images for training, or assemble V2 automatically. See `docs/taco_intake_contract.md` and `docs/taco_review_workflow.md`.
+Phase 0.8.2 and 0.8.3 add a local TACO intake workflow for future public-source review. It does not download TACO, approve public images for training, or assemble V2 automatically. See `docs/taco_intake_contract.md` and `docs/taco_review_workflow.md`.
 
 Prepare a local review queue after manually downloading TACO into ignored paths:
 
@@ -297,6 +297,21 @@ cp data/public_sources/taco_label_mapping.template.csv \
 ```
 
 `taco_label_mapping.template.csv` is tracked as an example contract. `taco_label_mapping.csv` is the ignored local working file for real mappings. Inspect the generated category inventory before adding approved mapping rules; no public candidate is automatically approved for V2 training.
+
+First create a plan-only licence ledger and manual download queue. This does not require local images:
+
+```bash
+python scripts/prepare_taco_intake.py \
+  --annotations data/public_sources/ingested/taco/annotations.json \
+  --label-mapping data/public_sources/taco_label_mapping.csv \
+  --output-dir data/public_sources/taco/review_outputs/plan_local \
+  --min-object-area-ratio 0.20 \
+  --plan-only
+```
+
+For TACO only, blank licence entries may become `eligible_for_review` under the official TACO missing-licence default rule. This is not training approval. Explicit `CC` and `ODBL` metadata remain blocked.
+
+After manual download and human review, run normal local intake:
 
 ```bash
 python scripts/prepare_taco_intake.py \
