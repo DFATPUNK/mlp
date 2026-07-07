@@ -27,6 +27,13 @@ PUBLIC_CLASSIFIER_COLUMNS = [
     "source_dataset_id",
     "source_item_id",
     "relative_path",
+    "source_url",
+    "source_license",
+    "source_license_reference",
+    "source_attribution",
+    "license_status",
+    "source_annotation_id",
+    "object_area_ratio",
     "source_label",
     "mapped_label",
     "mapping_rule_id",
@@ -41,6 +48,13 @@ PUBLIC_GATE_COLUMNS = [
     "source_dataset_id",
     "source_item_id",
     "relative_path",
+    "source_url",
+    "source_license",
+    "source_license_reference",
+    "source_attribution",
+    "license_status",
+    "source_annotation_id",
+    "object_area_ratio",
     "auto_route_eligible",
     "review_reason",
     "annotation_type",
@@ -68,6 +82,13 @@ CLASSIFICATION_OUTPUT_COLUMNS = [
     "source_dataset_id",
     "source_split",
     "source_item_id",
+    "source_url",
+    "source_license",
+    "source_license_reference",
+    "source_attribution",
+    "license_status",
+    "source_annotation_id",
+    "object_area_ratio",
     "parent_feedback_id",
     "original_label",
     "mapping_rule_id",
@@ -86,6 +107,13 @@ GATE_OUTPUT_COLUMNS = [
     "source_dataset_id",
     "source_split",
     "source_item_id",
+    "source_url",
+    "source_license",
+    "source_license_reference",
+    "source_attribution",
+    "license_status",
+    "source_annotation_id",
+    "object_area_ratio",
     "parent_feedback_id",
     "annotation_type",
     "object_count",
@@ -107,6 +135,8 @@ TRASHNET_QUARANTINE_COLUMNS = [
 
 ANNOTATION_TYPES = {"single_object", "cropped_object", "scene"}
 MAPPING_STATUSES = {"approved", "excluded", "needs_review"}
+LICENSE_STATUSES = {"eligible_for_review", "approved", "blocked"}
+PUBLIC_LICENCE_PROVENANCE_COLUMNS = ["source_url", "source_license", "source_license_reference", "source_attribution"]
 SPLITS = {"train", "validation", "test"}
 ENRICHMENT_SPLIT = "train"
 TRASHNET_SOURCE_DATASET_ID = "trashnet"
@@ -180,6 +210,16 @@ def _positive_int(value: str) -> int | None:
     return parsed if parsed > 0 else None
 
 
+def _valid_ratio(value: str) -> bool:
+    if value == "":
+        return True
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return False
+    return 0.0 <= parsed <= 1.0
+
+
 def _stable_id(prefix: str, *parts: str) -> str:
     digest = hashlib.sha256("\x1f".join(parts).encode("utf-8")).hexdigest()[:16]
     return f"{prefix}_{digest}"
@@ -205,6 +245,20 @@ def _count_duplicates(rows: list[dict[str, str]], key: str) -> Counter[str]:
 def _validate_common_relative_path(messages: list[str], label: str, row: dict[str, str]) -> None:
     if not _safe_relative_path(row.get("relative_path", "")):
         messages.append(f"{label}: relative_path must be relative and must not use parent traversal")
+
+
+def _validate_public_licence_fields(messages: list[str], label: str, row: dict[str, str], approved_for_training: bool) -> None:
+    if row.get("license_status") not in LICENSE_STATUSES:
+        messages.append(f"{label}: license_status must be one of {sorted(LICENSE_STATUSES)}")
+    if not _valid_ratio(row.get("object_area_ratio", "")):
+        messages.append(f"{label}: object_area_ratio must be blank or in [0, 1]")
+    if not approved_for_training:
+        return
+    if row.get("license_status") != "approved":
+        messages.append(f"{label}: public training candidates require license_status=approved")
+    missing = [column for column in PUBLIC_LICENCE_PROVENANCE_COLUMNS if row.get(column, "") == ""]
+    if missing:
+        messages.append(f"{label}: approved public training candidates require nonblank licence provenance fields {missing}")
 
 
 def _normalized_relative_path(value: str) -> str:
@@ -326,6 +380,7 @@ def _validate_public_classifier_rows(rows: list[dict[str, str]], mappings: dict[
         approved = _bool_value(row.get("approved_for_classifier_training", ""))
         if approved is None:
             messages.append(f"{label}: approved_for_classifier_training must be lowercase true or false")
+        _validate_public_licence_fields(messages, label, row, approved is True)
         if not approved:
             continue
         if row.get("annotation_type") not in {"single_object", "cropped_object"}:
@@ -372,6 +427,7 @@ def _validate_public_gate_rows(rows: list[dict[str, str]], messages: list[str]) 
         approved = _bool_value(row.get("approved_for_gate_training", ""))
         if approved is None:
             messages.append(f"{label}: approved_for_gate_training must be lowercase true or false")
+        _validate_public_licence_fields(messages, label, row, approved is True)
         if row.get("review_reason") not in REVIEW_REASONS:
             messages.append(f"{label}: review_reason must be one of {sorted(REVIEW_REASONS)}")
         if approved and eligible and (object_count != 1 or row.get("annotation_type") not in {"single_object", "cropped_object"}):
@@ -563,6 +619,13 @@ def _trashnet_classification_row(row: dict[str, str]) -> dict[str, str]:
         "source_dataset_id": "trashnet",
         "source_split": row["split"],
         "source_item_id": row["image_id"],
+        "source_url": "",
+        "source_license": "",
+        "source_license_reference": "",
+        "source_attribution": "",
+        "license_status": "",
+        "source_annotation_id": "",
+        "object_area_ratio": "",
         "parent_feedback_id": "",
         "original_label": row.get("source_class", ""),
         "mapping_rule_id": "",
@@ -582,6 +645,13 @@ def _feedback_classification_row(row: dict[str, str], feedback_image_root: str |
         "source_dataset_id": row["source"],
         "source_split": row["source_split"],
         "source_item_id": row["image_id"],
+        "source_url": "",
+        "source_license": "",
+        "source_license_reference": "",
+        "source_attribution": "",
+        "license_status": "",
+        "source_annotation_id": "",
+        "object_area_ratio": "",
         "parent_feedback_id": row["feedback_id"],
         "original_label": "",
         "mapping_rule_id": "",
@@ -605,6 +675,13 @@ def _public_classification_row(row: dict[str, str], public_image_root: str | Pat
         "source_dataset_id": row["source_dataset_id"],
         "source_split": "public_dataset",
         "source_item_id": row["source_item_id"],
+        "source_url": row["source_url"],
+        "source_license": row["source_license"],
+        "source_license_reference": row["source_license_reference"],
+        "source_attribution": row["source_attribution"],
+        "license_status": row["license_status"],
+        "source_annotation_id": row["source_annotation_id"],
+        "object_area_ratio": row["object_area_ratio"],
         "parent_feedback_id": "",
         "original_label": row["source_label"],
         "mapping_rule_id": row["mapping_rule_id"],
@@ -625,6 +702,13 @@ def _feedback_gate_row(row: dict[str, str], feedback_image_root: str | Path | No
         "source_dataset_id": row["source"],
         "source_split": row["source_split"],
         "source_item_id": row["image_id"],
+        "source_url": "",
+        "source_license": "",
+        "source_license_reference": "",
+        "source_attribution": "",
+        "license_status": "",
+        "source_annotation_id": "",
+        "object_area_ratio": "",
         "parent_feedback_id": row["feedback_id"],
         "annotation_type": "",
         "object_count": "",
@@ -644,6 +728,13 @@ def _public_gate_row(row: dict[str, str], public_image_root: str | Path | None) 
         "source_dataset_id": row["source_dataset_id"],
         "source_split": "public_dataset",
         "source_item_id": row["source_item_id"],
+        "source_url": row["source_url"],
+        "source_license": row["source_license"],
+        "source_license_reference": row["source_license_reference"],
+        "source_attribution": row["source_attribution"],
+        "license_status": row["license_status"],
+        "source_annotation_id": row["source_annotation_id"],
+        "object_area_ratio": row["object_area_ratio"],
         "parent_feedback_id": "",
         "annotation_type": row["annotation_type"],
         "object_count": row["object_count"],

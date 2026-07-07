@@ -8,9 +8,15 @@ data/feedback/feedback_manifest.csv
 data/feedback/images/**
 data/feedback/candidates/**
 data/public_sources/ingested/
+data/public_sources/ingested/taco/
 data/public_sources/public_classifier_candidates.csv
 data/public_sources/public_gate_candidates.csv
 data/public_sources/label_mapping.csv
+data/public_sources/taco_label_mapping.csv
+data/public_sources/taco/review_outputs/
+data/public_sources/taco/taco_classifier_candidates.csv
+data/public_sources/taco/taco_gate_candidates.csv
+data/public_sources/taco/taco_category_inventory.csv
 data/v2/
 artifacts/**
 !artifacts/.gitkeep
