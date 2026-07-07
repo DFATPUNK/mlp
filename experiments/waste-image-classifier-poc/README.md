@@ -292,6 +292,13 @@ Phase 0.8.2 adds a local TACO intake workflow for future public-source review. I
 Prepare a local review queue after manually downloading TACO into ignored paths:
 
 ```bash
+cp data/public_sources/taco_label_mapping.template.csv \
+  data/public_sources/taco_label_mapping.csv
+```
+
+`taco_label_mapping.template.csv` is tracked as an example contract. `taco_label_mapping.csv` is the ignored local working file for real mappings. Inspect the generated category inventory before adding approved mapping rules; no public candidate is automatically approved for V2 training.
+
+```bash
 python scripts/prepare_taco_intake.py \
   --annotations data/public_sources/ingested/taco/annotations.json \
   --image-root data/public_sources/ingested/taco/images \
