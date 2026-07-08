@@ -113,6 +113,33 @@ class TacoReviewBatchTests(unittest.TestCase):
         self.assertEqual(report["selected_counts_by_bucket"]["classifier_and_gate_candidate"], 5)
         self.assertEqual({row["source_item_id"] for row in batch_rows}, {f"cls_{index}" for index in range(5)})
 
+    def test_all_output_rows_share_one_batch_id(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            rows = [plan_row("cls_1")]
+            rows.extend(plan_row(f"multi_{index}", bucket="multiple_objects") for index in range(4))
+            report, output_dir = self.build(Path(tmp_dir), rows)
+
+            batch_rows = read_csv(output_dir / "taco_review_batch.csv")
+            report_json = read_json(output_dir / "taco_review_batch_report.json")
+
+        batch_ids = {row["batch_id"] for row in batch_rows}
+        self.assertEqual(batch_ids, {report["batch_id"]})
+        self.assertEqual(report_json["batch_id"], report["batch_id"])
+
+    def test_batch_id_changes_when_seed_or_limits_change(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp = Path(tmp_dir)
+            rows = [plan_row("cls_1")]
+            rows.extend(plan_row(f"multi_{index}", bucket="multiple_objects") for index in range(8))
+            plan_path = write_csv(tmp / "plan.csv", DOWNLOAD_PLAN_COLUMNS, rows)
+
+            report_default = build_taco_review_batch(download_plan=plan_path, output_dir=tmp / "default", seed="seed_a", multiple_objects_limit=4)
+            report_seed = build_taco_review_batch(download_plan=plan_path, output_dir=tmp / "seed", seed="seed_b", multiple_objects_limit=4)
+            report_limit = build_taco_review_batch(download_plan=plan_path, output_dir=tmp / "limit", seed="seed_a", multiple_objects_limit=5)
+
+        self.assertNotEqual(report_default["batch_id"], report_seed["batch_id"])
+        self.assertNotEqual(report_default["batch_id"], report_limit["batch_id"])
+
     def test_default_gate_buckets_respect_configured_limits(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             rows = [plan_row(f"cls_{index}") for index in range(3)]
@@ -165,9 +192,12 @@ class TacoReviewBatchTests(unittest.TestCase):
             csv_b = (out_b / "taco_review_batch.csv").read_bytes()
             json_a = (out_a / "taco_review_batch_report.json").read_bytes()
             json_b = (out_b / "taco_review_batch_report.json").read_bytes()
+            report_a = read_json(out_a / "taco_review_batch_report.json")
+            report_b = read_json(out_b / "taco_review_batch_report.json")
 
         self.assertEqual(csv_a, csv_b)
         self.assertEqual(json_a, json_b)
+        self.assertEqual(report_a["batch_id"], report_b["batch_id"])
 
     def test_changing_seed_can_alter_gate_selection_but_keeps_classifier_rows(self):
         with tempfile.TemporaryDirectory() as tmp_dir:

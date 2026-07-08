@@ -6,7 +6,7 @@ from collections import Counter, defaultdict, deque
 from pathlib import Path
 
 from .taco_intake import DOWNLOAD_PLAN_COLUMNS
-from .utils import ensure_dir, write_json
+from .utils import ensure_dir, sha256_file, write_json
 
 DEFAULT_SEED = "phase_0_8_4"
 DEFAULT_LIMITS = {
@@ -91,6 +91,18 @@ def _stable_digest(seed: str, source_item_id: str, plan_id: str) -> str:
 def _stable_id(prefix: str, *parts: str) -> str:
     digest = hashlib.sha256("\x1f".join(parts).encode("utf-8")).hexdigest()[:16]
     return f"{prefix}_{digest}"
+
+
+def _batch_id(*, download_plan_sha256: str, seed: str, limits: dict[str, int]) -> str:
+    limit_text = ";".join(f"{name}={limits[name]}" for name in sorted(limits))
+    return _stable_id(
+        "taco_batch",
+        download_plan_sha256,
+        seed,
+        limit_text,
+        SELECTION_POLICY_VERSION,
+        OUTPUT_SCHEMA_VERSION,
+    )
 
 
 def _canonical_list(value: str) -> str:
@@ -197,10 +209,9 @@ def _selection_reason(bucket: str, limit: int | None) -> str:
     return f"deterministic diverse gate-only sample for {bucket} up to limit {limit}"
 
 
-def _batch_row(row: dict[str, str], *, seed: str, limits: dict[str, int], bucket: str, selection_rank: int) -> dict[str, str]:
-    limit_text = ";".join(f"{name}={limits[name]}" for name in sorted(limits))
+def _batch_row(row: dict[str, str], *, batch_id: str, limits: dict[str, int], bucket: str, selection_rank: int) -> dict[str, str]:
     return {
-        "batch_id": _stable_id("taco_batch", row["plan_id"], row["source_item_id"], seed, limit_text),
+        "batch_id": batch_id,
         "selection_rank": str(selection_rank),
         "selection_bucket": bucket,
         "selection_reason": _selection_reason(bucket, limits.get(bucket)),
@@ -265,6 +276,7 @@ def build_taco_review_batch(
     if invalid_limits:
         raise TacoReviewBatchError([f"limits must be non-negative; got {invalid_limits}"])
 
+    download_plan_sha256 = sha256_file(download_plan)
     rows = _read_download_plan(download_plan)
     _validate_duplicate_source_items(rows)
     eligible_rows = [row for row in rows if _eligible(row)]
@@ -280,6 +292,7 @@ def build_taco_review_batch(
     for bucket in GATE_BUCKETS:
         selected_by_bucket[bucket] = _select_gate_bucket(rows_by_bucket[bucket], seed=seed, limit=limits[bucket])
 
+    batch_id = _batch_id(download_plan_sha256=download_plan_sha256, seed=seed, limits=limits)
     batch_rows = []
     selected_source_item_ids: set[str] = set()
     selection_rank = 1
@@ -288,7 +301,7 @@ def build_taco_review_batch(
             if row["source_item_id"] in selected_source_item_ids:
                 continue
             selected_source_item_ids.add(row["source_item_id"])
-            batch_rows.append(_batch_row(row, seed=seed, limits=limits, bucket=bucket, selection_rank=selection_rank))
+            batch_rows.append(_batch_row(row, batch_id=batch_id, limits=limits, bucket=bucket, selection_rank=selection_rank))
             selection_rank += 1
 
     available_counts = {bucket: len(rows_by_bucket[bucket]) for bucket in BUCKET_ORDER}
@@ -297,6 +310,7 @@ def build_taco_review_batch(
 
     report = {
         "input_plan_path": str(download_plan),
+        "batch_id": batch_id,
         "input_plan_rows": len(rows),
         "eligible_plan_rows": len(eligible_rows),
         "seed": seed,
