@@ -284,3 +284,56 @@ python scripts/build_v2_dataset.py \
 ```
 
 The builder blocks `external_diagnostic_v1` by default, even when supplied through Phase 0.7 candidate CSVs. Use `--allow-promoted-external-diagnostic` only when intentionally retiring that diagnostic set from future comparative or final evaluation.
+
+## Phase 0.8.2/0.8.3 TACO intake review queue
+
+Phase 0.8.2 and 0.8.3 add a local TACO intake workflow for future public-source review. It does not download TACO, approve public images for training, or assemble V2 automatically. See `docs/taco_intake_contract.md` and `docs/taco_review_workflow.md`.
+
+Prepare a local review queue after manually downloading TACO into ignored paths:
+
+```bash
+cp data/public_sources/taco_label_mapping.template.csv \
+  data/public_sources/taco_label_mapping.csv
+```
+
+`taco_label_mapping.template.csv` is tracked as an example contract. `taco_label_mapping.csv` is the ignored local working file for real mappings. Inspect the generated category inventory before adding approved mapping rules; no public candidate is automatically approved for V2 training.
+
+First create a plan-only licence ledger and manual download queue. This does not require local images:
+
+```bash
+python scripts/prepare_taco_intake.py \
+  --annotations data/public_sources/ingested/taco/annotations.json \
+  --label-mapping data/public_sources/taco_label_mapping.csv \
+  --output-dir data/public_sources/taco/review_outputs/plan_local \
+  --min-object-area-ratio 0.20 \
+  --plan-only
+```
+
+For TACO only, blank licence entries may become `eligible_for_review` under the official TACO missing-licence default rule. This is not training approval. Explicit `CC` and `ODBL` metadata remain blocked.
+
+Build a small deterministic review batch from the plan:
+
+```bash
+python scripts/build_taco_review_batch.py \
+  --download-plan data/public_sources/taco/review_outputs/plan_local/taco_download_plan.csv \
+  --output-dir data/public_sources/taco/review_outputs/batch_local \
+  --seed phase_0_8_4 \
+  --multiple-objects-limit 24 \
+  --ambiguous-scene-limit 14 \
+  --unsupported-material-limit 9
+```
+
+The batch is a review/download queue, not training data. It keeps all eligible classifier-and-gate rows and deterministically samples limited gate-only rows for visual review.
+
+After manual download and human review of selected rows, run normal local intake:
+
+```bash
+python scripts/prepare_taco_intake.py \
+  --annotations data/public_sources/ingested/taco/annotations.json \
+  --image-root data/public_sources/ingested/taco/images \
+  --label-mapping data/public_sources/taco_label_mapping.csv \
+  --output-dir data/public_sources/taco/review_outputs/local_run \
+  --min-object-area-ratio 0.20
+```
+
+The generated TACO classifier and gate candidates are drafts with training approval set to `false`. Public rows can enter V2 only after human review sets `license_status=approved`, supplies licence and attribution provenance, and explicitly approves the relevant training target.

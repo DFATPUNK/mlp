@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import hashlib
 import tempfile
 import unittest
 from pathlib import Path
@@ -12,10 +13,12 @@ from waste_poc.v2_dataset import (
     LABEL_MAPPING_COLUMNS,
     PUBLIC_CLASSIFIER_COLUMNS,
     PUBLIC_GATE_COLUMNS,
+    TRASHNET_QUARANTINE_COLUMNS,
     TRASHNET_COLUMNS,
     V2DatasetError,
     build_v2_dataset,
 )
+from waste_poc.utils import sha256_file
 
 
 def write_csv(path: Path, columns: list[str], rows: list[dict[str, str]]) -> Path:
@@ -61,6 +64,16 @@ def base_trashnet_rows() -> list[dict[str, str]]:
     ]
 
 
+def conflicting_trashnet_rows() -> list[dict[str, str]]:
+    return [
+        trashnet_row("conflict_train", "glass", "train", 1) | {"sha256": "conflict-sha"},
+        trashnet_row("conflict_validation", "metal", "validation", 2) | {"sha256": "conflict-sha"},
+        trashnet_row("safe_train", "plastic", "train", 3),
+        trashnet_row("safe_validation", "glass", "validation", 4),
+        trashnet_row("safe_test", "paper", "test", 5),
+    ]
+
+
 def feedback_classifier_row(**overrides) -> dict[str, str]:
     row = {
         "feedback_id": "fb_cls_1",
@@ -96,6 +109,13 @@ def public_classifier_row(**overrides) -> dict[str, str]:
         "source_dataset_id": "fictional_public_v1",
         "source_item_id": "item_1",
         "relative_path": "ingested/fictional_public_v1/item_1.jpg",
+        "source_url": "https://example.test/fictional_public_v1/item_1",
+        "source_license": "CC BY 4.0",
+        "source_license_reference": "https://creativecommons.org/licenses/by/4.0/",
+        "source_attribution": "Fictional Public Dataset item_1",
+        "license_status": "approved",
+        "source_annotation_id": "ann_1",
+        "object_area_ratio": "0.42",
         "source_label": "plastic bottle",
         "mapped_label": "plastic",
         "mapping_rule_id": "map_plastic_bottle",
@@ -114,6 +134,13 @@ def public_gate_row(**overrides) -> dict[str, str]:
         "source_dataset_id": "fictional_public_v1",
         "source_item_id": "gate_item_1",
         "relative_path": "ingested/fictional_public_v1/gate_item_1.jpg",
+        "source_url": "https://example.test/fictional_public_v1/gate_item_1",
+        "source_license": "CC BY 4.0",
+        "source_license_reference": "https://creativecommons.org/licenses/by/4.0/",
+        "source_attribution": "Fictional Public Dataset gate_item_1",
+        "license_status": "approved",
+        "source_annotation_id": "ann_gate_1",
+        "object_area_ratio": "0.34",
         "auto_route_eligible": "false",
         "review_reason": "multiple_objects",
         "annotation_type": "scene",
@@ -181,6 +208,66 @@ class V2DatasetTests(unittest.TestCase):
         self.assertEqual(splits_by_image["trash_train"], "train")
         self.assertEqual(splits_by_image["trash_val"], "validation")
         self.assertEqual(splits_by_image["trash_test"], "test")
+
+    def test_trashnet_conflicting_sha_rows_are_excluded_and_reported(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            paths = self.make_inputs(Path(tmp_dir), trashnet_rows=conflicting_trashnet_rows())
+            report = self.build(paths)
+
+            classification_rows = read_csv(paths["output"] / "v2_classification_manifest.csv")
+            quarantine_rows = read_csv(paths["output"] / "v2_trashnet_quarantine_report.csv")
+
+        self.assertNotIn("conflict_train", {row["image_id"] for row in classification_rows})
+        self.assertNotIn("conflict_validation", {row["image_id"] for row in classification_rows})
+        self.assertEqual(report["trashnet_input_rows"], 5)
+        self.assertEqual(report["trashnet_included_rows"], 3)
+        self.assertEqual(report["trashnet_quarantined_rows"], 2)
+        self.assertEqual(report["trashnet_label_conflict_sha_groups"], 1)
+        self.assertEqual(report["trashnet_quarantine_reason_counts"], {"conflicting_labels_same_sha256": 2})
+
+    def test_quarantine_report_preserves_labels_splits_and_manifest_hash(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            paths = self.make_inputs(Path(tmp_dir), trashnet_rows=conflicting_trashnet_rows())
+            source_manifest_hash = sha256_file(paths["trashnet"])
+            self.build(paths)
+
+            quarantine_rows = read_csv(paths["output"] / "v2_trashnet_quarantine_report.csv")
+            quarantine_header = header(paths["output"] / "v2_trashnet_quarantine_report.csv")
+
+        self.assertEqual(quarantine_header, TRASHNET_QUARANTINE_COLUMNS)
+        self.assertEqual([row["image_id"] for row in quarantine_rows], ["conflict_train", "conflict_validation"])
+        self.assertEqual([row["label"] for row in quarantine_rows], ["glass", "metal"])
+        self.assertEqual([row["split"] for row in quarantine_rows], ["train", "validation"])
+        self.assertTrue(all(row["source_manifest_sha256"] == source_manifest_hash for row in quarantine_rows))
+
+    def test_conflicting_train_validation_duplicate_is_not_reassigned(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            paths = self.make_inputs(Path(tmp_dir), trashnet_rows=conflicting_trashnet_rows())
+            self.build(paths)
+
+            quarantine_rows = read_csv(paths["output"] / "v2_trashnet_quarantine_report.csv")
+            classification_rows = read_csv(paths["output"] / "v2_classification_manifest.csv")
+
+        quarantined_splits = {row["image_id"]: row["split"] for row in quarantine_rows}
+        included_splits = {row["image_id"]: row["split"] for row in classification_rows}
+        self.assertEqual(quarantined_splits["conflict_train"], "train")
+        self.assertEqual(quarantined_splits["conflict_validation"], "validation")
+        self.assertEqual(included_splits["safe_train"], "train")
+        self.assertEqual(included_splits["safe_validation"], "validation")
+        self.assertEqual(included_splits["safe_test"], "test")
+
+    def test_empty_quarantine_report_is_written_when_no_conflicts_exist(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            paths = self.make_inputs(Path(tmp_dir))
+            report = self.build(paths)
+
+            quarantine_rows = read_csv(paths["output"] / "v2_trashnet_quarantine_report.csv")
+            quarantine_header = header(paths["output"] / "v2_trashnet_quarantine_report.csv")
+
+        self.assertEqual(quarantine_header, TRASHNET_QUARANTINE_COLUMNS)
+        self.assertEqual(quarantine_rows, [])
+        self.assertEqual(report["trashnet_quarantined_rows"], 0)
+        self.assertEqual(report["trashnet_label_conflict_sha_groups"], 0)
 
     def test_feedback_classifier_rows_enter_classification_output_as_train(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -259,6 +346,34 @@ class V2DatasetTests(unittest.TestCase):
         self.assertEqual(public_rows[0]["label"], "plastic")
         self.assertEqual(public_rows[0]["original_label"], "plastic bottle")
         self.assertEqual(public_rows[0]["mapping_rule_id"], "map_plastic_bottle")
+        self.assertEqual(public_rows[0]["source_url"], "https://example.test/fictional_public_v1/item_1")
+        self.assertEqual(public_rows[0]["source_license"], "CC BY 4.0")
+        self.assertEqual(public_rows[0]["source_license_reference"], "https://creativecommons.org/licenses/by/4.0/")
+        self.assertEqual(public_rows[0]["source_attribution"], "Fictional Public Dataset item_1")
+        self.assertEqual(public_rows[0]["license_status"], "approved")
+        self.assertEqual(public_rows[0]["source_annotation_id"], "ann_1")
+        self.assertEqual(public_rows[0]["object_area_ratio"], "0.42")
+
+    def test_public_training_rows_require_approved_license_status(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            paths = self.make_inputs(
+                Path(tmp_dir),
+                public_classifier_rows=[public_classifier_row(license_status="eligible_for_review")],
+                mapping_rows=[mapping_row()],
+            )
+
+            with self.assertRaisesRegex(V2DatasetError, "license_status=approved"):
+                self.build(paths, public_classifier_manifest=paths["public_classifier"], label_mapping=paths["mapping"])
+
+    def test_public_training_rows_require_license_provenance(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            paths = self.make_inputs(
+                Path(tmp_dir),
+                public_gate_rows=[public_gate_row(source_attribution="")],
+            )
+
+            with self.assertRaisesRegex(V2DatasetError, "nonblank licence provenance"):
+                self.build(paths, public_gate_manifest=paths["public_gate"])
 
     def test_same_sha256_from_different_sources_with_conflicting_labels_fails(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -293,6 +408,28 @@ class V2DatasetTests(unittest.TestCase):
                     feedback_image_root=feedback_root,
                     public_image_root=public_root,
                 )
+
+    def test_feedback_candidate_matching_quarantined_trashnet_sha_is_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp = Path(tmp_dir)
+            image_bytes = b"quarantined source bytes"
+            quarantined_sha = hashlib.sha256(image_bytes).hexdigest()
+            feedback_root = tmp / "feedback_images"
+            feedback_path = feedback_root / "feedback" / "quarantined.jpg"
+            feedback_path.parent.mkdir(parents=True)
+            feedback_path.write_bytes(image_bytes)
+            paths = self.make_inputs(
+                tmp,
+                trashnet_rows=[
+                    trashnet_row("conflict_glass", "glass", "train", 1) | {"sha256": quarantined_sha},
+                    trashnet_row("conflict_plastic", "plastic", "validation", 2) | {"sha256": quarantined_sha},
+                    trashnet_row("safe_train", "paper", "train", 3),
+                ],
+                classifier_feedback_rows=[feedback_classifier_row(relative_path="feedback/quarantined.jpg")],
+            )
+
+            with self.assertRaisesRegex(V2DatasetError, "quarantined due to conflicting TrashNet labels"):
+                self.build(paths, feedback_image_root=feedback_root)
 
     def test_blank_sha256_values_do_not_falsely_conflict(self):
         with tempfile.TemporaryDirectory() as tmp_dir:

@@ -27,6 +27,13 @@ PUBLIC_CLASSIFIER_COLUMNS = [
     "source_dataset_id",
     "source_item_id",
     "relative_path",
+    "source_url",
+    "source_license",
+    "source_license_reference",
+    "source_attribution",
+    "license_status",
+    "source_annotation_id",
+    "object_area_ratio",
     "source_label",
     "mapped_label",
     "mapping_rule_id",
@@ -41,6 +48,13 @@ PUBLIC_GATE_COLUMNS = [
     "source_dataset_id",
     "source_item_id",
     "relative_path",
+    "source_url",
+    "source_license",
+    "source_license_reference",
+    "source_attribution",
+    "license_status",
+    "source_annotation_id",
+    "object_area_ratio",
     "auto_route_eligible",
     "review_reason",
     "annotation_type",
@@ -68,6 +82,13 @@ CLASSIFICATION_OUTPUT_COLUMNS = [
     "source_dataset_id",
     "source_split",
     "source_item_id",
+    "source_url",
+    "source_license",
+    "source_license_reference",
+    "source_attribution",
+    "license_status",
+    "source_annotation_id",
+    "object_area_ratio",
     "parent_feedback_id",
     "original_label",
     "mapping_rule_id",
@@ -86,16 +107,40 @@ GATE_OUTPUT_COLUMNS = [
     "source_dataset_id",
     "source_split",
     "source_item_id",
+    "source_url",
+    "source_license",
+    "source_license_reference",
+    "source_attribution",
+    "license_status",
+    "source_annotation_id",
+    "object_area_ratio",
     "parent_feedback_id",
     "annotation_type",
     "object_count",
     "sha256",
 ]
 
+TRASHNET_QUARANTINE_COLUMNS = [
+    "quarantine_id",
+    "sha256",
+    "quarantine_reason",
+    "source_dataset_id",
+    "image_id",
+    "relative_path",
+    "label",
+    "split",
+    "source_commit",
+    "source_manifest_sha256",
+]
+
 ANNOTATION_TYPES = {"single_object", "cropped_object", "scene"}
 MAPPING_STATUSES = {"approved", "excluded", "needs_review"}
+LICENSE_STATUSES = {"eligible_for_review", "approved", "blocked"}
+PUBLIC_LICENCE_PROVENANCE_COLUMNS = ["source_url", "source_license", "source_license_reference", "source_attribution"]
 SPLITS = {"train", "validation", "test"}
 ENRICHMENT_SPLIT = "train"
+TRASHNET_SOURCE_DATASET_ID = "trashnet"
+TRASHNET_LABEL_CONFLICT_REASON = "conflicting_labels_same_sha256"
 V2_LEAKAGE_NOTICE = """# V2 External Diagnostic Promotion Notice
 
 Rows from `external_diagnostic_v1` were explicitly included in the V2 assembly outputs.
@@ -165,6 +210,16 @@ def _positive_int(value: str) -> int | None:
     return parsed if parsed > 0 else None
 
 
+def _valid_ratio(value: str) -> bool:
+    if value == "":
+        return True
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return False
+    return 0.0 <= parsed <= 1.0
+
+
 def _stable_id(prefix: str, *parts: str) -> str:
     digest = hashlib.sha256("\x1f".join(parts).encode("utf-8")).hexdigest()[:16]
     return f"{prefix}_{digest}"
@@ -190,6 +245,20 @@ def _count_duplicates(rows: list[dict[str, str]], key: str) -> Counter[str]:
 def _validate_common_relative_path(messages: list[str], label: str, row: dict[str, str]) -> None:
     if not _safe_relative_path(row.get("relative_path", "")):
         messages.append(f"{label}: relative_path must be relative and must not use parent traversal")
+
+
+def _validate_public_licence_fields(messages: list[str], label: str, row: dict[str, str], approved_for_training: bool) -> None:
+    if row.get("license_status") not in LICENSE_STATUSES:
+        messages.append(f"{label}: license_status must be one of {sorted(LICENSE_STATUSES)}")
+    if not _valid_ratio(row.get("object_area_ratio", "")):
+        messages.append(f"{label}: object_area_ratio must be blank or in [0, 1]")
+    if not approved_for_training:
+        return
+    if row.get("license_status") != "approved":
+        messages.append(f"{label}: public training candidates require license_status=approved")
+    missing = [column for column in PUBLIC_LICENCE_PROVENANCE_COLUMNS if row.get(column, "") == ""]
+    if missing:
+        messages.append(f"{label}: approved public training candidates require nonblank licence provenance fields {missing}")
 
 
 def _normalized_relative_path(value: str) -> str:
@@ -311,6 +380,7 @@ def _validate_public_classifier_rows(rows: list[dict[str, str]], mappings: dict[
         approved = _bool_value(row.get("approved_for_classifier_training", ""))
         if approved is None:
             messages.append(f"{label}: approved_for_classifier_training must be lowercase true or false")
+        _validate_public_licence_fields(messages, label, row, approved is True)
         if not approved:
             continue
         if row.get("annotation_type") not in {"single_object", "cropped_object"}:
@@ -357,6 +427,7 @@ def _validate_public_gate_rows(rows: list[dict[str, str]], messages: list[str]) 
         approved = _bool_value(row.get("approved_for_gate_training", ""))
         if approved is None:
             messages.append(f"{label}: approved_for_gate_training must be lowercase true or false")
+        _validate_public_licence_fields(messages, label, row, approved is True)
         if row.get("review_reason") not in REVIEW_REASONS:
             messages.append(f"{label}: review_reason must be one of {sorted(REVIEW_REASONS)}")
         if approved and eligible and (object_count != 1 or row.get("annotation_type") not in {"single_object", "cropped_object"}):
@@ -369,6 +440,53 @@ def _external_diagnostic_feedback_ids(classifier_rows: list[dict[str, str]], gat
         for row in [*classifier_rows, *gate_rows]
         if row.get("source_split") == EXTERNAL_DIAGNOSTIC_V1
     }
+
+
+def _trashnet_label_conflict_shas(rows: list[dict[str, str]]) -> set[str]:
+    labels_by_sha: dict[str, set[str]] = {}
+    for row in rows:
+        digest = row.get("sha256", "")
+        if not digest:
+            continue
+        labels_by_sha.setdefault(digest, set()).add(row.get("label", ""))
+    return {digest for digest, labels in labels_by_sha.items() if len(labels) > 1}
+
+
+def _trashnet_quarantine_row(row: dict[str, str], source_manifest_sha256: str) -> dict[str, str]:
+    return {
+        "quarantine_id": _stable_id("v2quarantine", row["sha256"], row["image_id"], row["relative_path"], row["label"], row["split"]),
+        "sha256": row["sha256"],
+        "quarantine_reason": TRASHNET_LABEL_CONFLICT_REASON,
+        "source_dataset_id": TRASHNET_SOURCE_DATASET_ID,
+        "image_id": row["image_id"],
+        "relative_path": row["relative_path"],
+        "label": row["label"],
+        "split": row["split"],
+        "source_commit": row.get("source_commit", ""),
+        "source_manifest_sha256": source_manifest_sha256,
+    }
+
+
+def _sort_trashnet_quarantine_rows(rows: list[dict[str, str]]) -> list[dict[str, str]]:
+    split_order = {"train": 0, "validation": 1, "test": 2}
+    return sorted(
+        rows,
+        key=lambda row: (
+            row["sha256"],
+            split_order.get(row["split"], 99),
+            row["label"],
+            row["image_id"],
+            row["relative_path"],
+            row["quarantine_id"],
+        ),
+    )
+
+
+def _curate_trashnet_label_conflicts(rows: list[dict[str, str]], source_manifest_sha256: str) -> tuple[list[dict[str, str]], list[dict[str, str]], set[str]]:
+    conflict_shas = _trashnet_label_conflict_shas(rows)
+    included_rows = [row for row in rows if row.get("sha256", "") not in conflict_shas]
+    quarantine_rows = [_trashnet_quarantine_row(row, source_manifest_sha256) for row in rows if row.get("sha256", "") in conflict_shas]
+    return included_rows, _sort_trashnet_quarantine_rows(quarantine_rows), conflict_shas
 
 
 def _classification_identity(row: dict[str, str]) -> tuple[str, str, str]:
@@ -430,6 +548,20 @@ def _validate_unique_non_empty_classification_sha(rows: list[dict[str, str]], me
         messages.append(message)
 
 
+def _validate_no_quarantined_sha_reentry(rows: list[dict[str, str]], quarantine_rows: list[dict[str, str]], messages: list[str]) -> None:
+    labels_by_sha: dict[str, set[str]] = {}
+    for row in quarantine_rows:
+        labels_by_sha.setdefault(row["sha256"], set()).add(row["label"])
+    for row in rows:
+        digest = row.get("sha256", "")
+        if row.get("source_kind") == "trashnet" or not digest or digest not in labels_by_sha:
+            continue
+        labels = sorted(labels_by_sha[digest])
+        messages.append(
+            f"{_row_identity_message(row)} has sha256={digest}, which is quarantined due to conflicting TrashNet labels {labels}"
+        )
+
+
 def _immutable_identity_message(enrichment_row: dict[str, str], immutable_row: dict[str, str], reason: str) -> str:
     return (
         f"{_row_identity_message(enrichment_row)} reuses TrashNet validation/test {reason} from "
@@ -440,9 +572,10 @@ def _immutable_identity_message(enrichment_row: dict[str, str], immutable_row: d
 def _validate_enrichment_does_not_reuse_validation_test_identities(
     classification_rows: list[dict[str, str]],
     gate_rows: list[dict[str, str]],
+    immutable_trashnet_rows: list[dict[str, str]],
     messages: list[str],
 ) -> None:
-    immutable_rows = [row for row in classification_rows if row["source_kind"] == "trashnet" and row["split"] in {"validation", "test"}]
+    immutable_rows = [row for row in immutable_trashnet_rows if row["split"] in {"validation", "test"}]
     immutable_by_sha = {row["sha256"]: row for row in immutable_rows if row.get("sha256")}
     immutable_by_image_id = {row["image_id"]: row for row in immutable_rows if row.get("image_id")}
     immutable_by_context_path = {
@@ -486,6 +619,13 @@ def _trashnet_classification_row(row: dict[str, str]) -> dict[str, str]:
         "source_dataset_id": "trashnet",
         "source_split": row["split"],
         "source_item_id": row["image_id"],
+        "source_url": "",
+        "source_license": "",
+        "source_license_reference": "",
+        "source_attribution": "",
+        "license_status": "",
+        "source_annotation_id": "",
+        "object_area_ratio": "",
         "parent_feedback_id": "",
         "original_label": row.get("source_class", ""),
         "mapping_rule_id": "",
@@ -505,6 +645,13 @@ def _feedback_classification_row(row: dict[str, str], feedback_image_root: str |
         "source_dataset_id": row["source"],
         "source_split": row["source_split"],
         "source_item_id": row["image_id"],
+        "source_url": "",
+        "source_license": "",
+        "source_license_reference": "",
+        "source_attribution": "",
+        "license_status": "",
+        "source_annotation_id": "",
+        "object_area_ratio": "",
         "parent_feedback_id": row["feedback_id"],
         "original_label": "",
         "mapping_rule_id": "",
@@ -528,6 +675,13 @@ def _public_classification_row(row: dict[str, str], public_image_root: str | Pat
         "source_dataset_id": row["source_dataset_id"],
         "source_split": "public_dataset",
         "source_item_id": row["source_item_id"],
+        "source_url": row["source_url"],
+        "source_license": row["source_license"],
+        "source_license_reference": row["source_license_reference"],
+        "source_attribution": row["source_attribution"],
+        "license_status": row["license_status"],
+        "source_annotation_id": row["source_annotation_id"],
+        "object_area_ratio": row["object_area_ratio"],
         "parent_feedback_id": "",
         "original_label": row["source_label"],
         "mapping_rule_id": row["mapping_rule_id"],
@@ -548,6 +702,13 @@ def _feedback_gate_row(row: dict[str, str], feedback_image_root: str | Path | No
         "source_dataset_id": row["source"],
         "source_split": row["source_split"],
         "source_item_id": row["image_id"],
+        "source_url": "",
+        "source_license": "",
+        "source_license_reference": "",
+        "source_attribution": "",
+        "license_status": "",
+        "source_annotation_id": "",
+        "object_area_ratio": "",
         "parent_feedback_id": row["feedback_id"],
         "annotation_type": "",
         "object_count": "",
@@ -567,6 +728,13 @@ def _public_gate_row(row: dict[str, str], public_image_root: str | Path | None) 
         "source_dataset_id": row["source_dataset_id"],
         "source_split": "public_dataset",
         "source_item_id": row["source_item_id"],
+        "source_url": row["source_url"],
+        "source_license": row["source_license"],
+        "source_license_reference": row["source_license_reference"],
+        "source_attribution": row["source_attribution"],
+        "license_status": row["license_status"],
+        "source_annotation_id": row["source_annotation_id"],
+        "object_area_ratio": row["object_area_ratio"],
         "parent_feedback_id": "",
         "annotation_type": row["annotation_type"],
         "object_count": row["object_count"],
@@ -616,6 +784,7 @@ def build_v2_dataset(
     public_image_root: str | Path | None = None,
 ) -> dict:
     messages: list[str] = []
+    source_manifest_sha256 = sha256_file(trashnet_manifest)
     trashnet_rows = _read_csv_exact(trashnet_manifest, TRASHNET_COLUMNS, "trashnet manifest")
     classifier_feedback_rows = _read_csv_exact(classifier_feedback_manifest, CLASSIFIER_CANDIDATE_COLUMNS, "classifier feedback manifest")
     gate_feedback_rows = _read_csv_exact(gate_feedback_manifest, GATE_CANDIDATE_COLUMNS, "gate feedback manifest")
@@ -642,7 +811,9 @@ def build_v2_dataset(
     if messages:
         raise V2DatasetError(messages)
 
-    classification_rows = [_trashnet_classification_row(row) for row in trashnet_rows]
+    curated_trashnet_rows, quarantine_rows, conflict_shas = _curate_trashnet_label_conflicts(trashnet_rows, source_manifest_sha256)
+
+    classification_rows = [_trashnet_classification_row(row) for row in curated_trashnet_rows]
     classification_rows.extend(_feedback_classification_row(row, feedback_image_root) for row in classifier_feedback_rows)
     classification_rows.extend(
         _public_classification_row(row, public_image_root)
@@ -655,9 +826,12 @@ def build_v2_dataset(
     output_messages: list[str] = []
     _validate_output_rows(classification_rows, CLASSIFICATION_OUTPUT_COLUMNS, "dataset_row_id", output_messages)
     _validate_output_rows(gate_rows, GATE_OUTPUT_COLUMNS, "gate_row_id", output_messages)
+    _validate_output_rows(quarantine_rows, TRASHNET_QUARANTINE_COLUMNS, "quarantine_id", output_messages)
     _validate_classification_conflicts(classification_rows, output_messages)
+    _validate_no_quarantined_sha_reentry(classification_rows, quarantine_rows, output_messages)
     _validate_unique_non_empty_classification_sha(classification_rows, output_messages)
-    _validate_enrichment_does_not_reuse_validation_test_identities(classification_rows, gate_rows, output_messages)
+    immutable_trashnet_rows = [_trashnet_classification_row(row) for row in trashnet_rows if row["split"] in {"validation", "test"}]
+    _validate_enrichment_does_not_reuse_validation_test_identities(classification_rows, gate_rows, immutable_trashnet_rows, output_messages)
     _validate_gate_duplicates(gate_rows, output_messages)
     if output_messages:
         raise V2DatasetError(output_messages)
@@ -668,6 +842,7 @@ def build_v2_dataset(
     output_dir = ensure_dir(output_dir)
     _write_csv(output_dir / "v2_classification_manifest.csv", CLASSIFICATION_OUTPUT_COLUMNS, classification_rows)
     _write_csv(output_dir / "v2_gate_manifest.csv", GATE_OUTPUT_COLUMNS, gate_rows)
+    _write_csv(output_dir / "v2_trashnet_quarantine_report.csv", TRASHNET_QUARANTINE_COLUMNS, quarantine_rows)
 
     leakage_notice_written = False
     if promoted_feedback_ids and allow_promoted_external_diagnostic:
@@ -686,6 +861,11 @@ def build_v2_dataset(
         "leakage_notice_written": leakage_notice_written,
         "public_classifier_input_rows": len(public_classifier_rows),
         "public_gate_input_rows": len(public_gate_rows),
+        "trashnet_input_rows": len(trashnet_rows),
+        "trashnet_included_rows": len(curated_trashnet_rows),
+        "trashnet_quarantined_rows": len(quarantine_rows),
+        "trashnet_label_conflict_sha_groups": len(conflict_shas),
+        "trashnet_quarantine_reason_counts": dict(Counter(row["quarantine_reason"] for row in quarantine_rows)),
     }
     write_json(output_dir / "v2_dataset_report.json", report)
     return report

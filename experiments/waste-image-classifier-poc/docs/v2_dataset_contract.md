@@ -12,6 +12,10 @@ The existing TrashNet manifest remains the baseline. Its `train`, `validation`, 
 
 This keeps validation and test comparable to the original POC and prevents new, inspected, or weakly mapped examples from silently entering model-selection splits.
 
+Raw source manifests are immutable historical records. V2 assembly may exclude source rows during curation, but it must not relabel, move, or rewrite the original source manifest or its split assignments.
+
+Byte-identical TrashNet images with contradictory material labels are quarantined rather than automatically relabelled. All occurrences in a conflicting-label SHA-256 group are excluded from V2 classification output, and `v2_trashnet_quarantine_report.csv` records each excluded occurrence as part of the V2 provenance record.
+
 Enrichment sources must not reuse immutable TrashNet validation or test identities. The builder checks matching non-empty SHA-256 values, matching image IDs, and matching relative paths when the source dataset context is the same.
 
 ## Two Datasets, Two Label Spaces
@@ -46,11 +50,15 @@ Every V2 row preserves where it came from:
 - `parent_feedback_id`: the feedback row that produced a candidate row.
 - `original_label`: the unmodified source label for mapped public classifier rows.
 - `mapping_rule_id`: the explicit approved mapping rule used for public classifier rows.
+- `source_url`, `source_license`, `source_license_reference`, and `source_attribution`: public-source licence and attribution evidence when applicable.
+- `license_status`, `source_annotation_id`, and `object_area_ratio`: public-source review status and annotation provenance when applicable.
 - `source_commit` and `sha256`: preserved when the source manifest provides them or when a local image root is explicitly supplied.
 
 Feedback candidate provenance is immutable. The V2 builder enforces these `source` / `source_split` pairs directly: `external_diagnostic` / `external_diagnostic_v1`, `workflow_feedback` / `workflow_feedback`, `manual_capture` / `manual_capture`, and `public_dataset` / `public_dataset`.
 
 Public-source labels are never mapped automatically. Each accepted public classifier row must reference an approved mapping rule that maps a specific `source_dataset_id` and `source_label` to one of the six supported material labels.
+
+Public-source rows are not eligible for V2 training merely because an intake script generated them. V2 requires `license_status=approved`, nonblank source URL, licence, licence reference, attribution, and explicit `approved_for_*_training=true`. Draft rows such as `eligible_for_review` or `blocked` must stay out of V2 outputs until reviewed.
 
 When non-empty SHA-256 values are available, the classification manifest rejects duplicate hashes across TrashNet, feedback, and public-source classifier rows. Blank hashes are allowed when source images are not locally available.
 
