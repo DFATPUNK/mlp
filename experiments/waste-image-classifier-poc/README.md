@@ -337,3 +337,11 @@ python scripts/prepare_taco_intake.py \
 ```
 
 The generated TACO classifier and gate candidates are drafts with training approval set to `false`. Public rows can enter V2 only after human review sets `license_status=approved`, supplies licence and attribution provenance, and explicitly approves the relevant training target.
+
+## Phase 0.9 CLIP binary gate experiment
+
+Phase 0.9 adds a local experimental binary review gate: frozen CLIP ViT-B/32 image embeddings plus balanced scikit-learn logistic regression. It does not fine-tune CLIP, change the six-class material model, or add deployment code. The gate can only override an existing V1 auto-route to `needs_review`; when the gate allows an image, the original V1 route is preserved.
+
+The current reviewed TACO challenge baseline unsafely auto-routes 20 of 37 expected-review images. Mode A trains on TrashNet positives plus feedback-only negatives and evaluates the 37 TACO rows as a mini-holdout. Mode B also trains on those TACO rows and must be labelled `in_sample_sanity_check_not_final_benchmark`.
+
+See [`docs/gate_experiment_phase_0_9.md`](docs/gate_experiment_phase_0_9.md) for the complete manifest, training, gate-evaluation, and combined-policy commands. Generated models, embeddings, V2 data, external evaluation inputs, and gate reports remain local and gitignored. No model is trained or evaluated as part of this code change.
