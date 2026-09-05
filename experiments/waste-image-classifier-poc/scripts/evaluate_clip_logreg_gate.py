@@ -7,6 +7,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 
 from waste_poc.gate_experiment import _bool_text, evaluate_gate_model
+from waste_poc.utils import write_json
 
 
 def main() -> int:
@@ -21,17 +22,25 @@ def main() -> int:
     parser.add_argument("--batch-size", type=int, default=16)
     parser.add_argument("--threshold", type=float, default=None)
     args = parser.parse_args()
+    output_dir = ROOT / args.output_dir
     report = evaluate_gate_model(
         gate_model=ROOT / args.gate_model,
         external_manifest=ROOT / args.external_manifest,
         image_root=ROOT / args.image_root,
-        output_dir=ROOT / args.output_dir,
+        output_dir=output_dir,
         expected_auto_route_eligible=_bool_text(args.expected_auto_route_eligible, label="--expected-auto-route-eligible"),
         evaluation_label=args.evaluation_label,
         device=args.device,
         batch_size=args.batch_size,
         threshold=args.threshold,
     )
+
+    # `auto_route_eligible=true` is the positive class. Blocking an expected-positive
+    # image is therefore a false negative, not a false positive.
+    report["false_negative_count"] = report.pop("false_positive_count")
+    report["false_negative_rate_if_known"] = report.pop("false_positive_rate_if_known")
+    write_json(output_dir / "gate_evaluation_report.json", report)
+
     print(f"Gate negative recall: {report['negative_recall']}")
     return 0
 
